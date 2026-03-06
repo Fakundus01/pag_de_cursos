@@ -51,6 +51,7 @@ export type CheckoutSession = {
   statusUrl: string;
   webhookPath: string;
   successUrl: string;
+  redirectUrl?: string | null;
 };
 
 export type ReferralRecord = {

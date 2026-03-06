@@ -1,7 +1,13 @@
 from __future__ import annotations
 
+import hashlib
+import hmac
+import json
 import os
 import re
+import urllib.error
+import urllib.parse
+import urllib.request
 from datetime import datetime, timedelta
 from decimal import Decimal
 from functools import wraps
@@ -121,6 +127,54 @@ def parse_frontend_origins() -> list[str]:
     if not raw_origins.strip():
         return DEFAULT_FRONTEND_ORIGINS
     return [origin.strip() for origin in raw_origins.split(",") if origin.strip()]
+
+
+def frontend_public_origin() -> str:
+    return os.getenv("FRONTEND_PUBLIC_URL", "").strip() or parse_frontend_origins()[0]
+
+
+def backend_public_origin() -> str:
+    explicit = os.getenv("BACKEND_PUBLIC_URL", "").strip()
+    if explicit:
+        return explicit.rstrip("/")
+    return "http://127.0.0.1:5000"
+
+
+def payment_currency() -> str:
+    raw = os.getenv("PAYMENT_CURRENCY", "USD").strip().upper()
+    return raw[:3] or "USD"
+
+
+def mercadopago_access_token() -> str:
+    return os.getenv("MERCADOPAGO_ACCESS_TOKEN", "").strip()
+
+
+def mercadopago_webhook_secret() -> str:
+    return os.getenv("MERCADOPAGO_WEBHOOK_SECRET", "").strip()
+
+
+def mercadopago_api_base_url() -> str:
+    return os.getenv("MERCADOPAGO_API_BASE_URL", "https://api.mercadopago.com").strip().rstrip("/")
+
+
+def mercadopago_enabled() -> bool:
+    return bool(mercadopago_access_token())
+
+
+def mercadopago_sandbox_mode() -> bool:
+    return env_bool("MERCADOPAGO_SANDBOX_MODE", True)
+
+
+def mercadopago_notification_url() -> str | None:
+    origin = backend_public_origin()
+    if not origin.startswith("https://"):
+        return None
+    return f"{origin}/api/payments/webhooks/mercado-pago"
+
+
+def build_course_payment_return_url(course: Course, reference: str, status: str) -> str:
+    encoded_reference = urllib.parse.quote(reference, safe="")
+    return f"{frontend_public_origin().rstrip('/')}/curso/{course.slug}?payment={status}&reference={encoded_reference}"
 
 
 def database_engine_name(database_url: str) -> str:
@@ -276,6 +330,7 @@ def ensure_purchase(
     status: str = "paid",
     provider: str = "Mercado Pago",
     referral: Referral | None = None,
+    currency: str | None = None,
 ) -> Purchase:
     purchase = Purchase.query.filter_by(provider_reference=provider_reference).first()
     if purchase is not None:
@@ -289,7 +344,7 @@ def ensure_purchase(
         provider=normalize_provider_label(provider),
         provider_reference=provider_reference,
         status=status,
-        currency="USD",
+        currency=currency or payment_currency(),
         subtotal_amount=subtotal_amount,
         discount_amount=discount_amount,
         total_amount=total_amount,
@@ -811,7 +866,7 @@ def serialize_course(course: Course, user: User | None = None) -> dict:
             for section in sorted(course.sections, key=lambda item: item.position)
         ],
         "commerce": {
-            "currency": "USD",
+            "currency": payment_currency(),
             "providers": ["Mercado Pago", "Visa", "Mastercard"],
             "latestPurchase": serialize_purchase(paid_purchase) if paid_purchase else None,
         },
@@ -972,7 +1027,16 @@ def normalize_payment_status(value: object) -> str:
     raw = str(value or "pending").strip().lower()
     if raw in {"paid", "approved", "success", "succeeded"}:
         return "paid"
-    if raw in {"failed", "rejected", "cancelled", "canceled"}:
+    if raw in {"failed", "rejected", "cancelled", "canceled", "refunded", "charged_back"}:
+        return "failed"
+    return "pending"
+
+
+def mercadopago_payment_status(value: object) -> str:
+    raw = str(value or "pending").strip().lower()
+    if raw == "approved":
+        return "paid"
+    if raw in {"rejected", "cancelled", "canceled", "refunded", "charged_back"}:
         return "failed"
     return "pending"
 
@@ -985,23 +1049,200 @@ def webhook_secret_is_valid() -> bool:
     return provided == expected
 
 
-def serialize_checkout_session(purchase: Purchase) -> dict:
+def parse_signature_header(signature_header: str) -> tuple[str | None, str | None]:
+    timestamp = None
+    signature = None
+    for part in signature_header.split(","):
+        key, _, value = part.strip().partition("=")
+        if key == "ts":
+            timestamp = value
+        if key == "v1":
+            signature = value
+    return timestamp, signature
+
+
+def mercadopago_signature_is_valid() -> bool:
+    secret = mercadopago_webhook_secret()
+    if not secret:
+        return True
+
+    signature_header = request.headers.get("x-signature", "").strip()
+    request_id = request.headers.get("x-request-id", "").strip()
+    payload = request.get_json(silent=True) or {}
+    data_id = request.args.get("data.id", "").strip() or str((payload.get("data") or {}).get("id", "")).strip()
+    timestamp, signature = parse_signature_header(signature_header)
+    if not timestamp or not signature or not request_id or not data_id:
+        return False
+
+    manifest = f"id:{data_id};request-id:{request_id};ts:{timestamp};"
+    expected = hmac.new(secret.encode("utf-8"), manifest.encode("utf-8"), hashlib.sha256).hexdigest()
+    return hmac.compare_digest(expected, signature)
+
+
+def mercadopago_api_request(
+    path: str,
+    *,
+    method: str = "GET",
+    payload: dict | None = None,
+    query: dict[str, object] | None = None,
+) -> dict:
+    access_token = mercadopago_access_token()
+    if not access_token:
+        raise RuntimeError("Mercado Pago access token is not configured")
+
+    url = f"{mercadopago_api_base_url()}{path}"
+    if query:
+        serialized_query = urllib.parse.urlencode({key: value for key, value in query.items() if value is not None}, doseq=True)
+        if serialized_query:
+            url = f"{url}?{serialized_query}"
+
+    body = None
+    headers = {
+        "Authorization": f"Bearer {access_token}",
+        "Accept": "application/json",
+    }
+    if payload is not None:
+        body = json.dumps(payload).encode("utf-8")
+        headers["Content-Type"] = "application/json"
+
+    request_data = urllib.request.Request(url, data=body, headers=headers, method=method.upper())
+    try:
+        with urllib.request.urlopen(request_data, timeout=20) as response:
+            raw_response = response.read().decode("utf-8")
+            return json.loads(raw_response) if raw_response else {}
+    except urllib.error.HTTPError as exc:
+        raw_error = exc.read().decode("utf-8", errors="ignore")
+        raise RuntimeError(f"Mercado Pago API error ({exc.code}): {raw_error[:220]}") from exc
+    except urllib.error.URLError as exc:
+        raise RuntimeError(f"Mercado Pago API unavailable: {exc.reason}") from exc
+
+
+def mercadopago_supports_provider(provider_label: str) -> bool:
+    return mercadopago_enabled() and normalize_provider_label(provider_label) in {"Mercado Pago", "Visa", "Mastercard"}
+
+
+def build_mercadopago_preference(purchase: Purchase) -> dict:
+    payload = {
+        "items": [
+            {
+                "id": purchase.course.slug,
+                "title": purchase.course.title,
+                "description": purchase.course.subtitle,
+                "quantity": 1,
+                "currency_id": purchase.currency,
+                "unit_price": amount_to_float(purchase.total_amount),
+            }
+        ],
+        "payer": {
+            "name": purchase.user.name,
+            "email": purchase.user.email,
+        },
+        "external_reference": purchase.provider_reference,
+        "metadata": {
+            "course_slug": purchase.course.slug,
+            "purchase_reference": purchase.provider_reference,
+            "user_id": purchase.user_id,
+        },
+        "back_urls": {
+            "success": build_course_payment_return_url(purchase.course, purchase.provider_reference or "", "success"),
+            "failure": build_course_payment_return_url(purchase.course, purchase.provider_reference or "", "failure"),
+            "pending": build_course_payment_return_url(purchase.course, purchase.provider_reference or "", "pending"),
+        },
+        "auto_return": "approved",
+    }
+    notification_url = mercadopago_notification_url()
+    if notification_url is not None:
+        payload["notification_url"] = notification_url
+    return payload
+
+
+def search_latest_mercadopago_payment(reference: str) -> dict | None:
+    response = mercadopago_api_request(
+        "/v1/payments/search",
+        query={
+            "sort": "date_created",
+            "criteria": "desc",
+            "range": "date_created",
+            "limit": 1,
+            "external_reference": reference,
+        },
+    )
+    results = response.get("results")
+    if isinstance(results, list) and results:
+        first_result = results[0]
+        if isinstance(first_result, dict):
+            return first_result
+    return None
+
+
+def fetch_mercadopago_payment(payment_id: str) -> dict:
+    return mercadopago_api_request(f"/v1/payments/{payment_id}")
+
+
+def sync_purchase_from_payment_payload(purchase: Purchase, payment_payload: dict) -> None:
+    payment_status = mercadopago_payment_status(payment_payload.get("status"))
+    if purchase.status == "paid" and payment_status != "paid":
+        return
+
+    payment_method = payment_payload.get("payment_method_id") or payment_payload.get("payment_type_id") or purchase.provider
+    purchase.provider = normalize_provider_label(payment_method)
+
+    if payment_status == "paid":
+        activate_paid_purchase(purchase)
+        return
+
+    purchase.status = payment_status
+    if payment_status != "paid":
+        purchase.paid_at = None
+
+
+def sync_purchase_from_remote_provider(purchase: Purchase) -> None:
+    if purchase.status == "paid" or not purchase.provider_reference:
+        return
+    if not mercadopago_supports_provider(purchase.provider):
+        return
+
+    payment_payload = search_latest_mercadopago_payment(purchase.provider_reference)
+    if payment_payload is None:
+        return
+    sync_purchase_from_payment_payload(purchase, payment_payload)
+
+
+def serialize_checkout_session(
+    purchase: Purchase,
+    *,
+    redirect_url: str | None = None,
+    webhook_provider: str | None = None,
+) -> dict:
     provider = normalize_provider_label(purchase.provider)
-    provider_slug = provider.lower().replace(" ", "-")
-    frontend_origin = parse_frontend_origins()[0]
+    provider_slug = (webhook_provider or provider).lower().replace(" ", "-")
+    reference = purchase.provider_reference or ""
     return {
-        "reference": purchase.provider_reference,
+        "reference": reference,
         "provider": provider,
         "status": purchase.status,
         "currency": purchase.currency,
         "amount": amount_to_float(purchase.total_amount),
         "discountAmount": amount_to_float(purchase.discount_amount),
-        "sandboxMode": True,
-        "nextAction": "redirect" if provider == "Mercado Pago" else "confirm_card",
-        "statusUrl": f"/api/payments/{purchase.provider_reference}",
+        "sandboxMode": mercadopago_sandbox_mode() if redirect_url else True,
+        "nextAction": "redirect" if redirect_url or provider == "Mercado Pago" else "confirm_card",
+        "statusUrl": f"/api/payments/{reference}",
         "webhookPath": f"/api/payments/webhooks/{provider_slug}",
-        "successUrl": f"{frontend_origin}/perfil",
+        "successUrl": build_course_payment_return_url(purchase.course, reference, "success"),
+        "redirectUrl": redirect_url,
     }
+
+
+def build_checkout_session_for_purchase(purchase: Purchase) -> dict:
+    if mercadopago_supports_provider(purchase.provider):
+        preference = mercadopago_api_request("/checkout/preferences", method="POST", payload=build_mercadopago_preference(purchase))
+        redirect_url = preference.get("sandbox_init_point") if mercadopago_sandbox_mode() else preference.get("init_point")
+        if not redirect_url:
+            redirect_url = preference.get("init_point") or preference.get("sandbox_init_point")
+        if not redirect_url:
+            raise RuntimeError("Mercado Pago preference did not return an init_point")
+        return serialize_checkout_session(purchase, redirect_url=str(redirect_url), webhook_provider="mercado-pago")
+    return serialize_checkout_session(purchase)
 
 
 def activate_paid_purchase(purchase: Purchase) -> None:
@@ -1186,10 +1427,14 @@ def register_routes(app: Flask) -> None:
 
         existing_pending = pending_purchase_for_user(user, course)
         if existing_pending is not None:
+            try:
+                checkout_session = build_checkout_session_for_purchase(existing_pending)
+            except RuntimeError as exc:
+                return jsonify({"error": str(exc)}), 502
             return jsonify({
                 "course": serialize_course(course, user),
                 "purchase": serialize_purchase(existing_pending),
-                "checkout": serialize_checkout_session(existing_pending),
+                "checkout": checkout_session,
             })
 
         data = request.get_json(silent=True) or {}
@@ -1215,10 +1460,14 @@ def register_routes(app: Flask) -> None:
             referral=referral,
         )
         db.session.commit()
+        try:
+            checkout_session = build_checkout_session_for_purchase(purchase)
+        except RuntimeError as exc:
+            return jsonify({"error": str(exc)}), 502
         return jsonify({
             "course": serialize_course(course, user),
             "purchase": serialize_purchase(purchase),
-            "checkout": serialize_checkout_session(purchase),
+            "checkout": checkout_session,
         }), 201
 
     @app.get("/api/payments/<reference>")
@@ -1227,6 +1476,13 @@ def register_routes(app: Flask) -> None:
         purchase = Purchase.query.filter_by(provider_reference=reference, user_id=user.id).first()
         if purchase is None:
             return jsonify({"error": "Purchase not found"}), 404
+
+        try:
+            sync_purchase_from_remote_provider(purchase)
+            db.session.commit()
+        except RuntimeError:
+            db.session.rollback()
+
         return jsonify({
             "purchase": serialize_purchase(purchase),
             "course": serialize_course(purchase.course, user),
@@ -1251,10 +1507,42 @@ def register_routes(app: Flask) -> None:
 
     @app.post("/api/payments/webhooks/<provider>")
     def payment_webhook(provider: str):
+        normalized_provider = normalize_provider_label(provider)
+        data = request.get_json(silent=True) or {}
+
+        if normalized_provider == "Mercado Pago":
+            if not mercadopago_signature_is_valid():
+                return jsonify({"error": "Invalid Mercado Pago webhook signature"}), 403
+
+            payment_id = request.args.get("data.id", "").strip() or str((data.get("data") or {}).get("id", "")).strip() or str(data.get("id", "")).strip()
+            if not payment_id:
+                return jsonify({"ok": True, "ignored": "missing payment id"}), 202
+
+            try:
+                payment_payload = fetch_mercadopago_payment(payment_id)
+            except RuntimeError as exc:
+                return jsonify({"error": str(exc)}), 502
+
+            reference = str(payment_payload.get("external_reference") or "").strip()
+            if not reference:
+                return jsonify({"ok": True, "ignored": "missing external_reference"}), 202
+
+            purchase = Purchase.query.filter_by(provider_reference=reference).first()
+            if purchase is None:
+                return jsonify({"error": "Purchase not found"}), 404
+
+            sync_purchase_from_payment_payload(purchase, payment_payload)
+            db.session.commit()
+            return jsonify({
+                "ok": True,
+                "purchase": serialize_purchase(purchase),
+                "course": serialize_course(purchase.course, purchase.user),
+                "checkout": serialize_checkout_session(purchase),
+            })
+
         if not webhook_secret_is_valid():
             return jsonify({"error": "Invalid webhook secret"}), 403
 
-        data = request.get_json(silent=True) or {}
         reference = str(data.get("reference") or data.get("providerReference") or "").strip()
         if not reference:
             return jsonify({"error": "Payment reference is required"}), 400
@@ -1263,7 +1551,7 @@ def register_routes(app: Flask) -> None:
         if purchase is None:
             return jsonify({"error": "Purchase not found"}), 404
 
-        purchase.provider = normalize_provider_label(provider)
+        purchase.provider = normalized_provider
         status = normalize_payment_status(data.get("status"))
 
         if status == "paid":

@@ -100,7 +100,8 @@ const normalizeCheckout = (checkout: any): CheckoutSession => ({
   nextAction: checkout.nextAction ?? "redirect",
   statusUrl: checkout.statusUrl ?? "",
   webhookPath: checkout.webhookPath ?? "",
-  successUrl: checkout.successUrl ?? ""
+  successUrl: checkout.successUrl ?? "",
+  redirectUrl: checkout.redirectUrl ?? null
 });
 
 const normalizeReferralRecord = (referral: any): ReferralRecord => ({

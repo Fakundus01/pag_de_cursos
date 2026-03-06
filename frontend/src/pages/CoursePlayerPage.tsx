@@ -97,6 +97,11 @@ type CheckoutActionResult = {
   checkout: CheckoutSession | null;
 };
 
+type StoredCheckoutSnapshot = {
+  reference: string;
+  redirectUrl?: string | null;
+};
+
 export const CoursePlayerPage = () => {
   const { slug } = useParams();
   const navigate = useNavigate();
@@ -206,15 +211,50 @@ export const CoursePlayerPage = () => {
     : true;
   const checkoutStorageKey = slug ? `starcraft-course-checkout-${slug}` : null;
 
-  const persistCheckoutReference = (reference: string | null) => {
+  const readStoredCheckout = (): StoredCheckoutSnapshot | null => {
+    if (!checkoutStorageKey || typeof window === "undefined") {
+      return null;
+    }
+    const rawValue = window.localStorage.getItem(checkoutStorageKey);
+    if (!rawValue) {
+      return null;
+    }
+    try {
+      const parsed = JSON.parse(rawValue) as StoredCheckoutSnapshot;
+      if (parsed && typeof parsed.reference === "string" && parsed.reference) {
+        return { reference: parsed.reference, redirectUrl: parsed.redirectUrl ?? null };
+      }
+    } catch {
+      return { reference: rawValue, redirectUrl: null };
+    }
+    return null;
+  };
+
+  const persistCheckoutSession = (nextCheckout: CheckoutSession | null) => {
     if (!checkoutStorageKey || typeof window === "undefined") {
       return;
     }
-    if (reference) {
-      window.localStorage.setItem(checkoutStorageKey, reference);
+    if (!nextCheckout || nextCheckout.status !== "pending") {
+      window.localStorage.removeItem(checkoutStorageKey);
       return;
     }
-    window.localStorage.removeItem(checkoutStorageKey);
+    window.localStorage.setItem(
+      checkoutStorageKey,
+      JSON.stringify({
+        reference: nextCheckout.reference,
+        redirectUrl: nextCheckout.redirectUrl ?? null
+      })
+    );
+  };
+
+  const openCheckoutWindow = (redirectUrl: string) => {
+    if (typeof window === "undefined") {
+      return;
+    }
+    const nextWindow = window.open(redirectUrl, "_blank", "noopener,noreferrer");
+    if (!nextWindow) {
+      window.location.href = redirectUrl;
+    }
   };
 
   const syncCourseState = (nextCourse: Course | null) => {
@@ -233,7 +273,10 @@ export const CoursePlayerPage = () => {
     );
   };
 
-  const applyCheckoutResult = (result: CheckoutActionResult, options: { silent?: boolean } = {}) => {
+  const applyCheckoutResult = (
+    result: CheckoutActionResult,
+    options: { silent?: boolean; storedRedirectUrl?: string | null } = {}
+  ) => {
     if (result.error) {
       if (!options.silent) {
         setFeedback(result.error);
@@ -243,14 +286,21 @@ export const CoursePlayerPage = () => {
 
     syncCourseState(result.course);
     if (result.checkout) {
-      setCheckoutSession(result.checkout);
-      if (result.checkout.status === "pending") {
-        persistCheckoutReference(result.checkout.reference);
+      const nextCheckout = !result.checkout.redirectUrl && options.storedRedirectUrl
+        ? { ...result.checkout, redirectUrl: options.storedRedirectUrl }
+        : result.checkout;
+      setCheckoutSession(nextCheckout);
+      if (nextCheckout.status === "pending") {
+        persistCheckoutSession(nextCheckout);
         if (!options.silent) {
-          setFeedback(`Checkout listo. Referencia ${result.checkout.reference}. Confirma el pago demo o espera el webhook.`);
+          setFeedback(
+            nextCheckout.redirectUrl
+              ? "Checkout real listo. Abre Mercado Pago y luego vuelve a esta pestana para que el curso se actualice solo."
+              : `Checkout listo. Referencia ${nextCheckout.reference}. Confirma el pago demo o espera el webhook.`
+          );
         }
       } else {
-        persistCheckoutReference(null);
+        persistCheckoutSession(null);
         if (!options.silent) {
           setFeedback("Pago confirmado y curso desbloqueado para tu cuenta.");
         }
@@ -263,8 +313,37 @@ export const CoursePlayerPage = () => {
     if (!slug || typeof window === "undefined") {
       return;
     }
+
+    const params = new URLSearchParams(window.location.search);
+    const reference = params.get("reference");
+    const paymentState = params.get("payment");
+
+    if (reference && checkoutStorageKey) {
+      const currentStored = readStoredCheckout();
+      window.localStorage.setItem(
+        checkoutStorageKey,
+        JSON.stringify({
+          reference,
+          redirectUrl: currentStored?.redirectUrl ?? null
+        })
+      );
+    }
+
+    if (paymentState === "success") {
+      setFeedback("Mercado Pago devolvio el pago como aprobado. Estamos validando el unlock.");
+    } else if (paymentState === "pending") {
+      setFeedback("Mercado Pago dejo el pago como pendiente. Puedes verificar el estado desde esta pagina.");
+    } else if (paymentState === "failure") {
+      setFeedback("El pago no se completo. Puedes retomar el checkout cuando quieras.");
+    }
+  }, [checkoutStorageKey, slug]);
+
+  useEffect(() => {
+    if (!slug || typeof window === "undefined") {
+      return;
+    }
     if (!showLocked) {
-      persistCheckoutReference(null);
+      persistCheckoutSession(null);
       setCheckoutSession(null);
     }
   }, [showLocked, slug]);
@@ -278,8 +357,8 @@ export const CoursePlayerPage = () => {
       return;
     }
 
-    const storedReference = window.localStorage.getItem(`starcraft-course-checkout-${slug}`);
-    if (!storedReference) {
+    const storedCheckout = readStoredCheckout();
+    if (!storedCheckout) {
       setCheckingCheckout(false);
       return;
     }
@@ -288,14 +367,14 @@ export const CoursePlayerPage = () => {
     setCheckingCheckout(true);
 
     void (async () => {
-      const result = await refreshCheckout(storedReference);
+      const result = await refreshCheckout(storedCheckout.reference);
       if (!isActive) {
         return;
       }
       if (result.error && result.error.toLowerCase().includes("not found")) {
-        persistCheckoutReference(null);
+        persistCheckoutSession(null);
       }
-      applyCheckoutResult(result, { silent: true });
+      applyCheckoutResult(result, { silent: true, storedRedirectUrl: storedCheckout.redirectUrl ?? null });
       setCheckingCheckout(false);
     })();
 
@@ -317,7 +396,10 @@ export const CoursePlayerPage = () => {
           return;
         }
         const shouldAnnounce = Boolean(!result.error && result.checkout && result.checkout.status === "paid");
-        applyCheckoutResult(result, { silent: !shouldAnnounce });
+        applyCheckoutResult(result, {
+          silent: !shouldAnnounce,
+          storedRedirectUrl: checkoutSession.redirectUrl ?? null
+        });
       })();
     }, 5000);
 
@@ -325,7 +407,7 @@ export const CoursePlayerPage = () => {
       isActive = false;
       window.clearInterval(intervalId);
     };
-  }, [checkoutSession?.reference, checkoutSession?.status]);
+  }, [checkoutSession?.reference, checkoutSession?.status, checkoutSession?.redirectUrl]);
 
   if (!authResolved || loading) {
     return <PageLoader fullScreen />;
@@ -749,22 +831,34 @@ export const CoursePlayerPage = () => {
                               {checkoutSession.discountAmount > 0 ? ` - descuento ${checkoutSession.currency} ${checkoutSession.discountAmount.toFixed(2)}` : ""}
                             </p>
                             <p className="mt-2 text-xs leading-6 text-steel">
-                              Sandbox demo: el front ya usa checkout y consulta de estado. Solo falta conectar el proveedor real con su webhook final.
+                              {checkoutSession.redirectUrl
+                                ? "Mercado Pago procesa Mercado Pago, Visa y Mastercard dentro del checkout real. Cuando termines el pago, esta pestana se actualiza por webhook o polling."
+                                : "Sandbox demo: si aun no configuras Mercado Pago real, puedes seguir confirmando el pago de prueba desde aqui."}
                             </p>
                             <div className="mt-4 flex flex-wrap gap-3">
-                              <button
-                                type="button"
-                                disabled={confirmingCheckout}
-                                className="rounded-full bg-sand px-4 py-2 text-sm font-medium text-abyss disabled:opacity-60"
-                                onClick={async () => {
-                                  setConfirmingCheckout(true);
-                                  const result = await confirmDemoPayment(checkoutSession.reference);
-                                  setConfirmingCheckout(false);
-                                  applyCheckoutResult(result);
-                                }}
-                              >
-                                {confirmingCheckout ? "Confirmando..." : "Confirmar pago demo"}
-                              </button>
+                              {checkoutSession.redirectUrl ? (
+                                <button
+                                  type="button"
+                                  className="rounded-full bg-sand px-4 py-2 text-sm font-medium text-abyss"
+                                  onClick={() => openCheckoutWindow(checkoutSession.redirectUrl ?? "")}
+                                >
+                                  Abrir checkout real
+                                </button>
+                              ) : (
+                                <button
+                                  type="button"
+                                  disabled={confirmingCheckout}
+                                  className="rounded-full bg-sand px-4 py-2 text-sm font-medium text-abyss disabled:opacity-60"
+                                  onClick={async () => {
+                                    setConfirmingCheckout(true);
+                                    const result = await confirmDemoPayment(checkoutSession.reference);
+                                    setConfirmingCheckout(false);
+                                    applyCheckoutResult(result);
+                                  }}
+                                >
+                                  {confirmingCheckout ? "Confirmando..." : "Confirmar pago demo"}
+                                </button>
+                              )}
                               <button
                                 type="button"
                                 disabled={checkingCheckout}
@@ -773,7 +867,7 @@ export const CoursePlayerPage = () => {
                                   setCheckingCheckout(true);
                                   const result = await refreshCheckout(checkoutSession.reference);
                                   setCheckingCheckout(false);
-                                  applyCheckoutResult(result);
+                                  applyCheckoutResult(result, { storedRedirectUrl: checkoutSession.redirectUrl ?? null });
                                 }}
                               >
                                 {checkingCheckout ? "Verificando..." : "Verificar estado"}
@@ -787,7 +881,7 @@ export const CoursePlayerPage = () => {
                             {profile.referralSummary?.qualifiedCount ? ` - hasta ${profile.referralSummary.discountPercent}% de descuento por referido activo` : ""}
                           </p>
                           <p className="mt-2 text-xs leading-6 text-steel">
-                            Si ya existe un checkout pendiente, retomamos esa referencia para evitar compras duplicadas.
+                            Si ya existe un checkout pendiente, retomamos esa referencia para evitar compras duplicadas. Si Mercado Pago esta configurado, tambien recuperamos el link del checkout real.
                           </p>
                         </div>
                         <button
