@@ -63,7 +63,7 @@ export const CourseCard = ({ course, progress = 0 }: { course: Course; progress?
         </div>
 
         <div className="mt-7 flex items-center justify-between">
-          <span className="text-lg font-semibold text-white">{course.isFree ? "Gratis" : `USD ${course.price}`}</span>
+          <span className="text-lg font-semibold text-white">{course.isFree ? "Gratis" : course.isUnlocked ? "Comprado" : `USD ${course.price}`}</span>
           <Link
             to={`/curso/${course.slug}`}
             target="_blank"

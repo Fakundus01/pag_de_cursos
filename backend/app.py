@@ -10,12 +10,24 @@ from flask import Flask, jsonify, request, session
 from flask_cors import CORS
 from werkzeug.security import check_password_hash, generate_password_hash
 
-from models import Comment, Course, CourseSection, Enrollment, PaymentMethod, Progress, Purchase, Referral, SectionContent, User, db
+from models import Comment, Course, CourseSection, Enrollment, PaymentMethod, Progress, Purchase, Referral, SectionContent, SupportEntry, User, db
 
 
 DATABASE_PATH = os.path.join(os.path.dirname(__file__), "academy.db")
 EMAIL_REGEX = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
 DEFAULT_FRONTEND_ORIGINS = ["http://127.0.0.1:5173", "http://localhost:5173"]
+DEFAULT_SUPPORT_FAQ = [
+    "Como desbloqueo un curso premium despues del pago?",
+    "Como funciona el progreso y el marcado de secciones?",
+    "Que hago si no puedo iniciar sesion o no veo mi compra?",
+    "Como usar el documento gratuito antes de comprar?",
+]
+DEFAULT_SUPPORT_KNOWLEDGE = [
+    "Los cursos premium se desbloquean para la cuenta que hizo la compra y el progreso queda guardado por seccion.",
+    "Si abres un curso en otra pesta?a, la sesion se revalida con cookies y sincronizacion al volver a enfocarla.",
+    "Cada seccion puede incluir documento, video obligatorio, actividad guiada y un quiz tactico.",
+    "El admin puede crear nuevas rutas con secciones, video, resumen accesible y contenido bloqueado o gratuito.",
+]
 
 
 COURSE_BLUEPRINTS = [
@@ -210,6 +222,30 @@ def ensure_comment(user: User, course: Course, body: str, stars: int) -> None:
         db.session.add(Comment(user_id=user.id, course_id=course.id, body=body, stars=stars))
 
 
+def ensure_support_entry(entry_type: str, body: str) -> None:
+    normalized_body = body.strip()
+    if not normalized_body:
+        return
+    existing = SupportEntry.query.filter_by(entry_type=entry_type, body=normalized_body).first()
+    if existing is None:
+        db.session.add(SupportEntry(entry_type=entry_type, body=normalized_body))
+
+
+def slugify_course(value: str) -> str:
+    slug = re.sub(r"[^a-z0-9]+", "-", value.strip().lower()).strip("-")
+    return slug[:120] or f"curso-{int(datetime.utcnow().timestamp())}"
+
+
+def ensure_unique_course_slug(seed: str) -> str:
+    base = slugify_course(seed)
+    candidate = base
+    suffix = 2
+    while Course.query.filter_by(slug=candidate).first() is not None:
+        candidate = f"{base[: max(1, 116 - len(str(suffix)))]}-{suffix}"
+        suffix += 1
+    return candidate
+
+
 def ensure_referral(referrer: User, referred_user: User, *, status: str, reward_percent: int = 10) -> Referral:
     referral = Referral.query.filter_by(referred_user_id=referred_user.id).first()
     if referral is not None:
@@ -286,7 +322,7 @@ def build_section_content_seed(section: CourseSection) -> list[dict]:
             "asset_url": f"https://assets.starcraft.academy/{section.course.slug}/{section.position}/video.mp4",
             "is_preview": False,
             "estimated_minutes": 12,
-            "metadata_json": {"provider": "cdn", "resolution": "1080p"},
+            "metadata_json": {"provider": "cdn", "resolution": "1080p", "videoRequired": True, "summary": f"Resumen accesible de {section.title.lower()} para repasar la informacion clave sin depender solo del audio."},
         },
         {
             "position": 3,
@@ -446,6 +482,11 @@ def seed_data() -> None:
     ensure_comment(admin, zerg, "Las practicas dinamicas ayudan a fijar timings.", 5)
     ensure_comment(raynor, protoss, "El curso premium deja clara la progresion por secciones.", 4)
 
+    for faq in DEFAULT_SUPPORT_FAQ:
+        ensure_support_entry("faq", faq)
+    for article in DEFAULT_SUPPORT_KNOWLEDGE:
+        ensure_support_entry("knowledge", article)
+
     db.session.commit()
 
 
@@ -500,6 +541,161 @@ def serialize_referral(referral: Referral) -> dict:
         "createdAt": isoformat_or_none(referral.created_at),
         "convertedAt": isoformat_or_none(referral.converted_at),
     }
+
+
+def serialize_support_content() -> dict:
+    faq_entries = SupportEntry.query.filter_by(entry_type="faq").order_by(SupportEntry.created_at.asc()).all()
+    knowledge_entries = SupportEntry.query.filter_by(entry_type="knowledge").order_by(SupportEntry.created_at.asc()).all()
+    return {
+        "faq": [entry.body for entry in faq_entries],
+        "knowledge": [entry.body for entry in knowledge_entries],
+    }
+
+
+def build_support_response(message: str) -> dict:
+    lowered = message.strip().lower()
+    support_content = serialize_support_content()
+    tokens = {token for token in re.findall(r"[a-z0-9??????]+", lowered) if len(token) > 2}
+    candidates = support_content["faq"] + support_content["knowledge"]
+    scored = []
+    for entry in candidates:
+        entry_lower = entry.lower()
+        score = sum(1 for token in tokens if token in entry_lower)
+        if score > 0:
+            scored.append((score, entry))
+
+    scored.sort(key=lambda item: (-item[0], item[1]))
+
+    if scored:
+        answer = scored[0][1]
+    elif any(keyword in lowered for keyword in {"pago", "compr", "tarjeta", "mercado"}):
+        answer = "Puedes comprar desde la vista del curso. Si el pago se confirma, la ruta queda marcada como comprada y se desbloquea para tu cuenta."
+    elif any(keyword in lowered for keyword in {"sesion", "login", "cuenta", "perfil"}):
+        answer = "Si cambias de pesta?a, la sesion se revalida con cookies y sincronizacion al volver a enfocarla. Desde perfil puedes revisar progreso, compras y referidos."
+    elif any(keyword in lowered for keyword in {"curso", "seccion", "video", "actividad"}):
+        answer = "Cada curso tiene secciones que puedes abrir en la misma pesta?a. El video puede ser obligatorio y debajo aparece un resumen accesible antes de avanzar."
+    else:
+        answer = "Puedo ayudarte con compras, progreso, cursos, soporte y acceso. Si quieres, pregunta por pagos, secciones, videos o inicio de sesion."
+
+    return {
+        "answer": answer,
+        "suggestions": support_content["faq"][:3],
+    }
+
+
+def parse_tag_values(raw_tags: object) -> str:
+    if isinstance(raw_tags, list):
+        values = [str(tag).strip() for tag in raw_tags if str(tag).strip()]
+    else:
+        values = [value.strip() for value in str(raw_tags or "").split(",") if value.strip()]
+    return ",".join(values)
+
+
+def create_course_from_admin_payload(data: dict) -> Course:
+    title = str(data.get("title", "")).strip()
+    description = str(data.get("description", "")).strip()
+    if not title:
+        raise ValueError("Course title is required")
+    if not description:
+        raise ValueError("Course description is required")
+
+    sections_payload = data.get("sections", [])
+    if not isinstance(sections_payload, list) or not sections_payload:
+        raise ValueError("At least one section is required")
+
+    requested_slug = str(data.get("slug", "")).strip()
+    slug = ensure_unique_course_slug(requested_slug or title)
+    course = Course(
+        slug=slug,
+        title=title,
+        subtitle=str(data.get("subtitle", "Curso premium")).strip() or "Curso premium",
+        description=description,
+        level=str(data.get("level", "Intermedio")).strip() or "Intermedio",
+        is_free=bool(data.get("isFree", False)),
+        price=0 if bool(data.get("isFree", False)) else max(0, int(data.get("price", 0) or 0)),
+        rating=float(data.get("rating", 4.8) or 4.8),
+        students=0,
+        locked=not bool(data.get("isFree", False)),
+        tags=parse_tag_values(data.get("tags", [])),
+    )
+    db.session.add(course)
+    db.session.flush()
+
+    for index, section_data in enumerate(sections_payload, start=1):
+        section_title = str(section_data.get("title", "")).strip()
+        if not section_title:
+            raise ValueError(f"Section {index} title is required")
+
+        section = CourseSection(
+            course_id=course.id,
+            title=section_title,
+            duration=str(section_data.get("duration", f"{8 + index} min")).strip() or f"{8 + index} min",
+            position=index,
+        )
+        db.session.add(section)
+        db.session.flush()
+
+        document_body = str(section_data.get("documentBody", "")).strip() or f"Documento base para {section_title.lower()} con objetivos y errores frecuentes."
+        video_url = str(section_data.get("videoUrl", "")).strip() or None
+        video_summary = str(section_data.get("videoSummary", "")).strip() or f"Resumen accesible de {section_title.lower()} para repasar la clase sin depender solo del audio."
+        activity_body = str(section_data.get("activityBody", "")).strip() or f"Actividad guiada para aplicar {section_title.lower()} en una partida real."
+        quiz_body = str(section_data.get("quizBody", "")).strip() or f"Quiz final de la seccion {section_title.lower()} con decisiones tacticas."
+        is_preview = bool(section_data.get("isPreview", course.is_free or index == 1))
+
+        blocks = [
+            SectionContent(
+                section_id=section.id,
+                title=f"Documento central: {section_title}",
+                content_type="document",
+                status="published",
+                body=document_body,
+                asset_url=None,
+                is_preview=is_preview,
+                estimated_minutes=max(4, int(section_data.get("documentMinutes", 8) or 8)),
+                position=1,
+                metadata_json={"format": "markdown", "difficulty": course.level.lower()},
+            ),
+            SectionContent(
+                section_id=section.id,
+                title=f"Video principal: {section_title}",
+                content_type="video",
+                status="published",
+                body=f"Video obligatorio para {section_title.lower()}.",
+                asset_url=video_url,
+                is_preview=course.is_free and index == 1,
+                estimated_minutes=max(4, int(section_data.get("videoMinutes", 12) or 12)),
+                position=2,
+                metadata_json={"videoRequired": True, "summary": video_summary, "provider": "custom"},
+            ),
+            SectionContent(
+                section_id=section.id,
+                title=f"Actividad guiada: {section_title}",
+                content_type="activity",
+                status="published",
+                body=activity_body,
+                asset_url=None,
+                is_preview=False,
+                estimated_minutes=max(3, int(section_data.get("activityMinutes", 10) or 10)),
+                position=3,
+                metadata_json={"generator": "guided-ai", "topic": section_title},
+            ),
+            SectionContent(
+                section_id=section.id,
+                title=f"Quiz tactico: {section_title}",
+                content_type="quiz",
+                status="published",
+                body=quiz_body,
+                asset_url=None,
+                is_preview=False,
+                estimated_minutes=max(3, int(section_data.get("quizMinutes", 6) or 6)),
+                position=4,
+                metadata_json={"questionCount": 5, "scoring": "per-question"},
+            ),
+        ]
+        db.session.add_all(blocks)
+
+    db.session.flush()
+    return course
 
 
 def build_activity(course: Course) -> dict:
@@ -854,6 +1050,18 @@ def register_routes(app: Flask) -> None:
         payload["activity"] = build_activity(course)
         return jsonify(payload)
 
+    @app.get("/api/support/content")
+    def get_support_content():
+        return jsonify(serialize_support_content())
+
+    @app.post("/api/support/chat")
+    def support_chat():
+        data = request.get_json(force=True)
+        message = str(data.get("message", "")).strip()
+        if not message:
+            return jsonify({"error": "Message is required"}), 400
+        return jsonify(build_support_response(message))
+
     @app.post("/api/auth/register")
     def register():
         data = request.get_json(force=True)
@@ -1111,6 +1319,40 @@ def register_routes(app: Flask) -> None:
         update_enrollment_progress(enrollment)
         db.session.commit()
         return jsonify({"profile": serialize_profile(user)})
+
+    @app.post("/api/admin/courses")
+    @admin_required
+    def admin_create_course(user: User):
+        data = request.get_json(force=True)
+        try:
+            course = create_course_from_admin_payload(data)
+        except ValueError as exc:
+            db.session.rollback()
+            return jsonify({"error": str(exc)}), 400
+
+        db.session.commit()
+        payload = serialize_course(course, user)
+        payload["comments"] = []
+        payload["activity"] = build_activity(course)
+        return jsonify({"course": payload}), 201
+
+    @app.put("/api/admin/support")
+    @admin_required
+    def admin_save_support(user: User):
+        data = request.get_json(force=True)
+        faq_items = [str(item).strip() for item in data.get("faq", []) if str(item).strip()]
+        knowledge_items = [str(item).strip() for item in data.get("knowledge", []) if str(item).strip()]
+
+        SupportEntry.query.delete()
+        db.session.flush()
+
+        for item in faq_items:
+            db.session.add(SupportEntry(entry_type="faq", body=item))
+        for item in knowledge_items:
+            db.session.add(SupportEntry(entry_type="knowledge", body=item))
+
+        db.session.commit()
+        return jsonify(serialize_support_content())
 
     @app.get("/api/admin/stats")
     @admin_required

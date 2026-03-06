@@ -127,11 +127,11 @@ export const HomePage = () => {
             <div key={course.id} className="rounded-[28px] border border-white/10 bg-abyss/60 p-5">
               <div className="flex items-center justify-between">
                 <h3 className="text-lg font-semibold text-sand">{course.title}</h3>
-                <span className="rounded-full border border-flare/40 bg-flare/10 px-3 py-1 text-xs text-flare">Candado activo</span>
+                {course.isUnlocked ? <span className="rounded-full border border-aurora/40 bg-aurora/10 px-3 py-1 text-xs text-aurora">Comprado</span> : <span className="rounded-full border border-flare/40 bg-flare/10 px-3 py-1 text-xs text-flare">Candado activo</span>}
               </div>
               <p className="mt-3 text-sm text-steel">{course.description}</p>
               <div className="mt-4 flex items-center justify-between text-sm">
-                <span className="text-white">USD {course.price}</span>
+                <span className="text-white">{course.isUnlocked ? "Comprado" : `USD ${course.price}`}</span>
                 <Link to={profile ? "/perfil" : "/registrarse"} className="text-aurora">
                   {profile ? "Ver perfil" : "Crear cuenta"}
                 </Link>

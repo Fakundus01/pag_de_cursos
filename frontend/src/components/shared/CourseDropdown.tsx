@@ -38,9 +38,9 @@ export const CourseDropdown = () => {
                 >
                   <div>
                     <p className="font-medium text-sand">{course.title}</p>
-                    <p className="text-xs text-steel">{course.isFree ? "Acceso gratis" : `USD ${course.price}`}</p>
+                    <p className="text-xs text-steel">{course.isFree ? "Acceso gratis" : course.isUnlocked ? "Comprado" : `USD ${course.price}`}</p>
                   </div>
-                  {showLocked ? <LockKeyhole size={16} className="text-flare" /> : <span className="text-xs text-aurora">Abierto</span>}
+                  {showLocked ? <LockKeyhole size={16} className="text-flare" /> : <span className="text-xs text-aurora">{course.isUnlocked && !course.isFree ? "Comprado" : "Abierto"}</span>}
                 </Link>
               );
             })}

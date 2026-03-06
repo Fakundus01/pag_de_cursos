@@ -130,3 +130,36 @@ export type ChatMessage = {
   role: "assistant" | "user";
   body: string;
 };
+
+export type SupportContent = {
+  faq: string[];
+  knowledge: string[];
+};
+
+export type SupportChatReply = {
+  answer: string;
+  suggestions: string[];
+};
+
+export type AdminCourseSectionPayload = {
+  title: string;
+  duration: string;
+  isPreview?: boolean;
+  documentBody: string;
+  videoUrl: string;
+  videoSummary: string;
+  activityBody: string;
+  quizBody: string;
+};
+
+export type AdminCoursePayload = {
+  title: string;
+  slug?: string;
+  subtitle: string;
+  description: string;
+  level: string;
+  isFree: boolean;
+  price: number;
+  tags: string[];
+  sections: AdminCourseSectionPayload[];
+};

@@ -1,7 +1,7 @@
 import { createContext, useContext, useEffect, useMemo, useState, type ReactNode } from "react";
 import { initialChat, mockCourses } from "../data/mock";
 import { api, getErrorMessage } from "../lib/api";
-import type { ChatMessage, ContentBlock, Course, DashboardStats, PurchaseSummary, ReferralRecord, ReferralSummary, Trophy, UserProfile } from "../types";
+import type { AdminCoursePayload, ChatMessage, ContentBlock, Course, DashboardStats, PurchaseSummary, ReferralRecord, ReferralSummary, Trophy, UserProfile } from "../types";
 
 type AuthForm = {
   email: string;
@@ -31,6 +31,7 @@ type AppContextValue = {
   updateProfile: (form: { name: string; avatar: string }) => Promise<string | null>;
   completeSection: (courseSlug: string, sectionId: string) => Promise<string | null>;
   purchaseCourse: (courseSlug: string, form?: PurchaseForm) => Promise<PurchaseResult>;
+  createAdminCourse: (payload: AdminCoursePayload) => Promise<{ error: string | null; course: Course | null }>;
   addChatMessage: (body: string) => void;
 };
 
@@ -345,6 +346,21 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
           return { error: null, course: normalizedCourse };
         } catch (error) {
           return { error: getErrorMessage(error, "No se pudo procesar la compra."), course: null };
+        }
+      },
+      createAdminCourse: async (payload) => {
+        if (!profile?.isAdmin) {
+          return { error: "Debes iniciar sesion como admin para crear cursos.", course: null };
+        }
+
+        try {
+          const response = await api.adminCreateCourse(payload);
+          const normalizedCourse = normalizeCourse(response.course);
+          mergeCourse(normalizedCourse);
+          syncTabs("admin-course");
+          return { error: null, course: normalizedCourse };
+        } catch (error) {
+          return { error: getErrorMessage(error, "No se pudo crear el curso."), course: null };
         }
       },
       addChatMessage: (body) => {

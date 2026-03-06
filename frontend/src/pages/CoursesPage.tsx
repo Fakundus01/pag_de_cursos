@@ -29,7 +29,7 @@ export const CoursesPage = () => {
                     Bloqueado
                   </span>
                 ) : (
-                  <span className="rounded-full border border-aurora/40 bg-aurora/10 px-3 py-1 text-xs text-aurora">{course.isFree ? "Gratis" : "Desbloqueado"}</span>
+                  <span className="rounded-full border border-aurora/40 bg-aurora/10 px-3 py-1 text-xs text-aurora">{course.isFree ? "Gratis" : course.isUnlocked ? "Comprado" : "Desbloqueado"}</span>
                 )}
               </div>
 
@@ -53,7 +53,7 @@ export const CoursesPage = () => {
                   <Sparkles size={16} className="text-aurora" />
                   {course.students} estudiantes
                 </span>
-                <span>{course.isFree ? "Gratis" : `USD ${course.price}`}</span>
+                <span>{course.isFree ? "Gratis" : course.isUnlocked ? "Comprado" : `USD ${course.price}`}</span>
               </div>
             </article>
           );

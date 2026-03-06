@@ -191,3 +191,11 @@ class SectionContent(db.Model):
     created_at = db.Column(db.DateTime, default=datetime.utcnow, nullable=False)
 
     section = db.relationship("CourseSection", back_populates="content_blocks")
+
+
+
+class SupportEntry(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    entry_type = db.Column(db.String(20), nullable=False, default="faq")
+    body = db.Column(db.Text, nullable=False)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow, nullable=False)

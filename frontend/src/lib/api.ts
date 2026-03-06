@@ -1,3 +1,5 @@
+import type { AdminCoursePayload, SupportChatReply, SupportContent } from "../types";
+
 const defaultApiOrigin = typeof window !== "undefined" ? `${window.location.protocol}//${window.location.hostname}:5000` : "http://127.0.0.1:5000";
 const API_URL = import.meta.env.VITE_API_URL ?? `${defaultApiOrigin}/api`;
 
@@ -45,6 +47,8 @@ export const api = {
   course: (slug: string) => request<any>(`/courses/${slug}`),
   me: () => request<{ profile: any | null }>("/auth/me"),
   profile: () => request<{ profile: any }>("/profile"),
+  supportContent: () => request<SupportContent>("/support/content"),
+  supportChat: (payload: { message: string }) => request<SupportChatReply>("/support/chat", { method: "POST", body: JSON.stringify(payload) }),
   updateProfile: (payload: { name: string; avatar: string }) =>
     request<{ profile: any }>("/profile", { method: "PATCH", body: JSON.stringify(payload) }),
   stats: () => request<any>("/admin/stats"),
@@ -58,5 +62,7 @@ export const api = {
   addComment: (slug: string, payload: { body: string; stars: number }) =>
     request<{ comment: any }>(`/courses/${slug}/comments`, { method: "POST", body: JSON.stringify(payload) }),
   purchaseCourse: (slug: string, payload: { provider?: string; brand?: string; last4?: string }) =>
-    request<{ profile: any; course: any; purchase: any }>(`/courses/${slug}/purchase`, { method: "POST", body: JSON.stringify(payload) })
+    request<{ profile: any; course: any; purchase: any }>(`/courses/${slug}/purchase`, { method: "POST", body: JSON.stringify(payload) }),
+  adminCreateCourse: (payload: AdminCoursePayload) => request<{ course: any }>("/admin/courses", { method: "POST", body: JSON.stringify(payload) }),
+  adminSaveSupport: (payload: SupportContent) => request<SupportContent>("/admin/support", { method: "PUT", body: JSON.stringify(payload) })
 };
