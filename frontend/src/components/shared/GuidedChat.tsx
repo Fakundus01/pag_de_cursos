@@ -100,8 +100,9 @@ export const GuidedChat = () => {
                 <button
                   key={question}
                   type="button"
+                  disabled={loadingReply}
                   onClick={() => void sendMessage(question)}
-                  className="rounded-full border border-white/10 bg-white/5 px-3 py-2 text-left text-xs text-white transition hover:border-aurora/35 hover:bg-white/10"
+                  className="rounded-full border border-white/10 bg-white/5 px-3 py-2 text-left text-xs text-white transition hover:border-aurora/35 hover:bg-white/10 disabled:cursor-not-allowed disabled:opacity-60"
                 >
                   {question}
                 </button>
@@ -141,7 +142,7 @@ export const GuidedChat = () => {
               placeholder="Pregunta por pagos, secciones, progreso o soporte"
               className="flex-1 rounded-full border border-white/10 bg-white/5 px-4 py-2 text-sm text-white outline-none placeholder:text-steel"
             />
-            <button type="submit" disabled={loadingReply} className="grid h-10 w-10 place-items-center rounded-full bg-sand text-abyss disabled:opacity-60">
+            <button type="submit" disabled={loadingReply || !draft.trim()} className="grid h-10 w-10 place-items-center rounded-full bg-sand text-abyss disabled:opacity-60">
               <SendHorizontal size={16} />
             </button>
           </form>

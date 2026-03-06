@@ -172,6 +172,14 @@ def mercadopago_notification_url() -> str | None:
     return f"{origin}/api/payments/webhooks/mercado-pago"
 
 
+def seed_demo_users_enabled() -> bool:
+    return env_bool("SEED_DEMO_USERS", True)
+
+
+def demo_payments_enabled() -> bool:
+    return env_bool("ENABLE_DEMO_PAYMENTS", True)
+
+
 def build_course_payment_return_url(course: Course, reference: str, status: str) -> str:
     encoded_reference = urllib.parse.quote(reference, safe="")
     return f"{frontend_public_origin().rstrip('/')}/curso/{course.slug}?payment={status}&reference={encoded_reference}"
@@ -248,6 +256,37 @@ def ensure_payment_method(user: User, brand: str, last4: str) -> PaymentMethod:
     db.session.add(payment_method)
     db.session.flush()
     return payment_method
+
+
+def ensure_bootstrap_admin() -> None:
+    email = os.getenv("INITIAL_ADMIN_EMAIL", "").strip().lower()
+    password = os.getenv("INITIAL_ADMIN_PASSWORD", "").strip()
+    if not email or not password:
+        return
+
+    name = os.getenv("INITIAL_ADMIN_NAME", "Platform Admin").strip() or "Platform Admin"
+    avatar = (os.getenv("INITIAL_ADMIN_AVATAR", "")[:8].strip() or "".join(part[0].upper() for part in name.split()[:2]) or "PA")
+    user = User.query.filter_by(email=email).first()
+    if user is None:
+        user = User(
+            name=name,
+            email=email,
+            password_hash=generate_password_hash(password),
+            avatar=avatar,
+            streak_days=1,
+            referral_code=build_unique_referral_code(name or email.split("@")[0]),
+            is_admin=True,
+        )
+        db.session.add(user)
+        db.session.flush()
+        return
+
+    if not user.is_admin:
+        user.is_admin = True
+    if not user.referral_code:
+        user.referral_code = build_unique_referral_code(user.name or email.split("@")[0])
+    if not user.avatar:
+        user.avatar = avatar
 
 
 def ensure_enrollment(user: User, course: Course, *, purchased: bool, progress_percent: int = 0, is_completed: bool = False) -> Enrollment:
@@ -469,79 +508,81 @@ def seed_data() -> None:
         for section in course.sections:
             ensure_section_content(section)
 
-    admin = ensure_demo_user(
-        email="sarah@starcraft.academy",
-        name="Sarah Kerrigan",
-        password="change-me",
-        avatar="SK",
-        streak_days=7,
-        referral_code="ZERG10",
-        is_admin=True,
-    )
-    raynor = ensure_demo_user(
-        email="raynor@starcraft.academy",
-        name="Jim Raynor",
-        password="change-me",
-        avatar="JR",
-        streak_days=3,
-        referral_code="RAYNOR",
-        is_admin=False,
-    )
-
-    admin_visa = ensure_payment_method(admin, "Visa", "4242")
-    ensure_payment_method(admin, "Mastercard", "1288")
-    raynor_visa = ensure_payment_method(raynor, "Visa", "5454")
-
-    terran = courses["fundamentos-terran"]
-    zerg = courses["zerg-ladder-control"]
-    protoss = courses["protoss-pressure"]
-
-    admin_free = ensure_enrollment(admin, terran, purchased=True, progress_percent=100, is_completed=True)
-    admin_zerg = ensure_enrollment(admin, zerg, purchased=True, progress_percent=35, is_completed=False)
-    raynor_free = ensure_enrollment(raynor, terran, purchased=True, progress_percent=33, is_completed=False)
-    ensure_enrollment(raynor, protoss, purchased=True, progress_percent=0, is_completed=False)
-
-    for section in sorted(terran.sections, key=lambda item: item.position):
-        ensure_progress(admin_free, section)
-    first_zerg_section = sorted(zerg.sections, key=lambda item: item.position)[0]
-    ensure_progress(admin_zerg, first_zerg_section)
-    first_terran_section = sorted(terran.sections, key=lambda item: item.position)[0]
-    ensure_progress(raynor_free, first_terran_section)
-
-    update_enrollment_progress(admin_free)
-    update_enrollment_progress(admin_zerg)
-    update_enrollment_progress(raynor_free)
-
-    referral = ensure_referral(admin, raynor, status="rewarded", reward_percent=10)
-    ensure_purchase(
-        admin,
-        zerg,
-        provider_reference="seed-admin-zerg",
-        payment_method=admin_visa,
-        subtotal_amount=Decimal("39.00"),
-        discount_amount=Decimal("0.00"),
-        total_amount=Decimal("39.00"),
-    )
-    ensure_purchase(
-        raynor,
-        protoss,
-        provider_reference="seed-raynor-protoss",
-        payment_method=raynor_visa,
-        subtotal_amount=Decimal("49.00"),
-        discount_amount=Decimal("4.90"),
-        total_amount=Decimal("44.10"),
-        referral=referral,
-    )
-
-    ensure_comment(admin, terran, "La doc gratuita ya muestra bastante nivel.", 5)
-    ensure_comment(admin, zerg, "Las practicas dinamicas ayudan a fijar timings.", 5)
-    ensure_comment(raynor, protoss, "El curso premium deja clara la progresion por secciones.", 4)
-
     for faq in DEFAULT_SUPPORT_FAQ:
         ensure_support_entry("faq", faq)
     for article in DEFAULT_SUPPORT_KNOWLEDGE:
         ensure_support_entry("knowledge", article)
 
+    if seed_demo_users_enabled():
+        admin = ensure_demo_user(
+            email="sarah@starcraft.academy",
+            name="Sarah Kerrigan",
+            password="change-me",
+            avatar="SK",
+            streak_days=7,
+            referral_code="ZERG10",
+            is_admin=True,
+        )
+        raynor = ensure_demo_user(
+            email="raynor@starcraft.academy",
+            name="Jim Raynor",
+            password="change-me",
+            avatar="JR",
+            streak_days=3,
+            referral_code="RAYNOR",
+            is_admin=False,
+        )
+
+        admin_visa = ensure_payment_method(admin, "Visa", "4242")
+        ensure_payment_method(admin, "Mastercard", "1288")
+        raynor_visa = ensure_payment_method(raynor, "Visa", "5454")
+
+        terran = courses["fundamentos-terran"]
+        zerg = courses["zerg-ladder-control"]
+        protoss = courses["protoss-pressure"]
+
+        admin_free = ensure_enrollment(admin, terran, purchased=True, progress_percent=100, is_completed=True)
+        admin_zerg = ensure_enrollment(admin, zerg, purchased=True, progress_percent=35, is_completed=False)
+        raynor_free = ensure_enrollment(raynor, terran, purchased=True, progress_percent=33, is_completed=False)
+        ensure_enrollment(raynor, protoss, purchased=True, progress_percent=0, is_completed=False)
+
+        for section in sorted(terran.sections, key=lambda item: item.position):
+            ensure_progress(admin_free, section)
+        first_zerg_section = sorted(zerg.sections, key=lambda item: item.position)[0]
+        ensure_progress(admin_zerg, first_zerg_section)
+        first_terran_section = sorted(terran.sections, key=lambda item: item.position)[0]
+        ensure_progress(raynor_free, first_terran_section)
+
+        update_enrollment_progress(admin_free)
+        update_enrollment_progress(admin_zerg)
+        update_enrollment_progress(raynor_free)
+
+        referral = ensure_referral(admin, raynor, status="rewarded", reward_percent=10)
+        ensure_purchase(
+            admin,
+            zerg,
+            provider_reference="seed-admin-zerg",
+            payment_method=admin_visa,
+            subtotal_amount=Decimal("39.00"),
+            discount_amount=Decimal("0.00"),
+            total_amount=Decimal("39.00"),
+        )
+        ensure_purchase(
+            raynor,
+            protoss,
+            provider_reference="seed-raynor-protoss",
+            payment_method=raynor_visa,
+            subtotal_amount=Decimal("49.00"),
+            discount_amount=Decimal("4.90"),
+            total_amount=Decimal("44.10"),
+            referral=referral,
+        )
+
+        ensure_comment(admin, terran, "La doc gratuita ya muestra bastante nivel.", 5)
+        ensure_comment(admin, zerg, "Las practicas dinamicas ayudan a fijar timings.", 5)
+        ensure_comment(raynor, protoss, "El curso premium deja clara la progresion por secciones.", 4)
+
+    ensure_bootstrap_admin()
     db.session.commit()
 
 
@@ -607,34 +648,82 @@ def serialize_support_content() -> dict:
     }
 
 
+def tokenize_support_text(value: str) -> set[str]:
+    return {token for token in re.findall(r"[a-z0-9]+", value.lower()) if len(token) > 2}
+
+
+def normalize_support_token(token: str) -> str:
+    normalized = token.lower()
+    if normalized.endswith("es") and len(normalized) > 5:
+        normalized = normalized[:-2]
+    elif normalized.endswith("s") and len(normalized) > 4:
+        normalized = normalized[:-1]
+    return normalized
+
+
+def support_tokens_match(left: str, right: str) -> bool:
+    left_normalized = normalize_support_token(left)
+    right_normalized = normalize_support_token(right)
+    if left_normalized == right_normalized:
+        return True
+    shortest = min(len(left_normalized), len(right_normalized))
+    if shortest >= 5 and (left_normalized in right_normalized or right_normalized in left_normalized):
+        return True
+    return False
+
+
+def support_match_score(message_tokens: set[str], entry_tokens: set[str]) -> int:
+    score = 0
+    for message_token in message_tokens:
+        if any(support_tokens_match(message_token, entry_token) for entry_token in entry_tokens):
+            score += 1
+    return score
+
+
+def best_support_match(entries: list[str], tokens: set[str]) -> str | None:
+    scored: list[tuple[int, int, str]] = []
+    for entry in entries:
+        entry_tokens = tokenize_support_text(entry)
+        score = support_match_score(tokens, entry_tokens)
+        if score > 0:
+            scored.append((score, len(entry_tokens), entry))
+    if not scored:
+        return None
+    scored.sort(key=lambda item: (-item[0], item[1], item[2]))
+    return scored[0][2]
+
+
+def support_fallback_answer(lowered: str) -> str:
+    if any(keyword in lowered for keyword in {"pago", "compr", "tarjeta", "mercado"}):
+        return "Puedes iniciar la compra desde la vista del curso. Si el pago entra aprobado, el curso se desbloquea para tu cuenta y queda marcado como comprado."
+    if any(keyword in lowered for keyword in {"sesion", "login", "cuenta", "perfil", "cookie"}):
+        return "La sesion se mantiene con cookies. Si cambias de pesta?a, el estado se revalida al volver y desde perfil puedes revisar progreso, compras y referidos."
+    if any(keyword in lowered for keyword in {"curso", "seccion", "video", "actividad", "test", "juego"}):
+        return "Cada curso se divide por secciones. Puede haber video obligatorio, resumen accesible, actividad guiada y test final antes de marcarlo como completado."
+    if any(keyword in lowered for keyword in {"admin", "panel", "dashboard"}):
+        return "Desde admin puedes crear cursos, editar soporte guiado, revisar registros, ingresos y gestionar el contenido por secciones."
+    return "Puedo ayudarte con compras, progreso, cursos, soporte y acceso. Si quieres, pregunta por pagos, secciones, videos, perfil o panel admin."
+
+
 def build_support_response(message: str) -> dict:
     lowered = message.strip().lower()
     support_content = serialize_support_content()
-    tokens = {token for token in re.findall(r"[a-z0-9??????]+", lowered) if len(token) > 2}
-    candidates = support_content["faq"] + support_content["knowledge"]
-    scored = []
-    for entry in candidates:
-        entry_lower = entry.lower()
-        score = sum(1 for token in tokens if token in entry_lower)
-        if score > 0:
-            scored.append((score, entry))
+    tokens = tokenize_support_text(lowered)
 
-    scored.sort(key=lambda item: (-item[0], item[1]))
+    knowledge_match = best_support_match(support_content["knowledge"], tokens)
+    faq_match = best_support_match(support_content["faq"], tokens)
 
-    if scored:
-        answer = scored[0][1]
-    elif any(keyword in lowered for keyword in {"pago", "compr", "tarjeta", "mercado"}):
-        answer = "Puedes comprar desde la vista del curso. Si el pago se confirma, la ruta queda marcada como comprada y se desbloquea para tu cuenta."
-    elif any(keyword in lowered for keyword in {"sesion", "login", "cuenta", "perfil"}):
-        answer = "Si cambias de pesta?a, la sesion se revalida con cookies y sincronizacion al volver a enfocarla. Desde perfil puedes revisar progreso, compras y referidos."
-    elif any(keyword in lowered for keyword in {"curso", "seccion", "video", "actividad"}):
-        answer = "Cada curso tiene secciones que puedes abrir en la misma pesta?a. El video puede ser obligatorio y debajo aparece un resumen accesible antes de avanzar."
-    else:
-        answer = "Puedo ayudarte con compras, progreso, cursos, soporte y acceso. Si quieres, pregunta por pagos, secciones, videos o inicio de sesion."
+    answer = knowledge_match or support_fallback_answer(lowered)
+    if faq_match and faq_match.lower() == lowered and knowledge_match is None:
+        answer = support_fallback_answer(lowered)
+
+    suggestions = [entry for entry in support_content["faq"] if entry.strip().lower() != lowered][:3]
+    if not suggestions:
+        suggestions = support_content["faq"][:3]
 
     return {
         "answer": answer,
-        "suggestions": support_content["faq"][:3],
+        "suggestions": suggestions,
     }
 
 
@@ -1242,7 +1331,9 @@ def build_checkout_session_for_purchase(purchase: Purchase) -> dict:
         if not redirect_url:
             raise RuntimeError("Mercado Pago preference did not return an init_point")
         return serialize_checkout_session(purchase, redirect_url=str(redirect_url), webhook_provider="mercado-pago")
-    return serialize_checkout_session(purchase)
+    if demo_payments_enabled():
+        return serialize_checkout_session(purchase)
+    raise RuntimeError("Real payment provider is not configured and demo payments are disabled")
 
 
 def activate_paid_purchase(purchase: Purchase) -> None:
@@ -1492,6 +1583,9 @@ def register_routes(app: Flask) -> None:
     @app.post("/api/payments/<reference>/confirm-demo")
     @login_required
     def confirm_demo_payment(user: User, reference: str):
+        if not demo_payments_enabled():
+            return jsonify({"error": "Demo payments are disabled"}), 404
+
         purchase = Purchase.query.filter_by(provider_reference=reference, user_id=user.id).first()
         if purchase is None:
             return jsonify({"error": "Purchase not found"}), 404
@@ -1572,6 +1666,9 @@ def register_routes(app: Flask) -> None:
     @app.post("/api/courses/<slug>/purchase")
     @login_required
     def purchase_course(user: User, slug: str):
+        if not demo_payments_enabled():
+            return jsonify({"error": "Demo payments are disabled"}), 404
+
         course = Course.query.filter_by(slug=slug).first_or_404()
         if course.is_free:
             enrollment = get_or_create_enrollment(user, course)
@@ -1738,6 +1835,6 @@ app = create_app()
 
 
 if __name__ == "__main__":
-    app.run(port=5000, debug=True)
+    app.run(port=5000, debug=env_bool("FLASK_DEBUG", False))
 
 

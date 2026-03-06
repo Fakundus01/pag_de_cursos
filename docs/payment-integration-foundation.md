@@ -46,3 +46,11 @@ Variables nuevas en `backend/.env.example`:
 - `notification_url` solo se envia automaticamente si `BACKEND_PUBLIC_URL` usa `https://`.
 - Aunque el webhook no este disponible en local, el polling puede sincronizar el pago usando la busqueda por `external_reference`.
 - Visa y Mastercard se procesan dentro del checkout de Mercado Pago, por eso el front mantiene la seleccion pero redirige al mismo checkout real.
+
+
+## Endurecimiento previo a deploy
+
+- `ENABLE_DEMO_PAYMENTS=false` apaga `/api/courses/<slug>/purchase` y `/api/payments/<reference>/confirm-demo` en producci?n.
+- `SEED_DEMO_USERS=false` evita crear usuarios demo y compras seed en producci?n.
+- `INITIAL_ADMIN_EMAIL` + `INITIAL_ADMIN_PASSWORD` permiten bootstrapear el primer admin sin depender del usuario demo.
+- `FLASK_DEBUG=false` queda como default para no exponer debug por error.
