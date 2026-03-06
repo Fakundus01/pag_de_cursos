@@ -1,0 +1,66 @@
+services:
+  - type: web
+    name: starcraft-academy-api
+    runtime: python
+    plan: starter
+    rootDir: backend
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn app:app --bind 0.0.0.0:$PORT
+    healthCheckPath: /api/health
+    autoDeploy: true
+    disk:
+      name: starcraft-media
+      mountPath: /var/data/starcraft-media
+      sizeGB: 5
+    envVars:
+      - key: DATABASE_URL
+        fromDatabase:
+          name: starcraft-academy-db
+          property: connectionString
+      - key: SECRET_KEY
+        generateValue: true
+      - key: BACKEND_PUBLIC_URL
+        sync: false
+      - key: FRONTEND_PUBLIC_URL
+        sync: false
+      - key: FRONTEND_ORIGINS
+        sync: false
+      - key: MEDIA_UPLOAD_ROOT
+        value: /var/data/starcraft-media/uploads
+      - key: MEDIA_UPLOAD_MAX_MB
+        value: "200"
+      - key: SESSION_COOKIE_NAME
+        value: starcraft_academy_session
+      - key: SESSION_COOKIE_SAMESITE
+        value: None
+      - key: SESSION_COOKIE_SECURE
+        value: "true"
+      - key: SESSION_LIFETIME_DAYS
+        value: "7"
+      - key: EMAIL_VERIFICATION_REQUIRED
+        value: "true"
+      - key: FLASK_DEBUG
+        value: "false"
+
+  - type: web
+    name: starcraft-academy-web
+    runtime: static
+    rootDir: frontend
+    buildCommand: npm ci && npm run build
+    staticPublishPath: dist
+    autoDeploy: true
+    routes:
+      - type: rewrite
+        source: /*
+        destination: /index.html
+    envVars:
+      - key: VITE_API_URL
+        sync: false
+
+databases:
+  - name: starcraft-academy-db
+    databaseName: starcraft_academy
+    user: starcraft_academy_user
+    plan: free
+    postgresMajorVersion: "16"
+    ipAllowList: []
