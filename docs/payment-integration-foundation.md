@@ -55,6 +55,7 @@ Variables nuevas en `backend/.env.example`:
 - `INITIAL_ADMIN_EMAIL` + `INITIAL_ADMIN_PASSWORD` permiten bootstrapear el primer admin sin depender del usuario demo.
 - `FLASK_DEBUG=false` queda como default para no exponer debug por error.
 - El backend agrega headers de seguridad (`X-Content-Type-Options`, `X-Frame-Options`, `Referrer-Policy` y `Permissions-Policy`), y suma `Strict-Transport-Security` cuando recibe trafico HTTPS.
+- Verificacion de email y recuperacion de contrasena ya quedaron activas; el detalle de endpoints y SMTP esta en `docs/auth-email-flows.md`.
 
 
 ## CSRF

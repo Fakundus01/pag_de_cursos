@@ -1,7 +1,7 @@
 import { createContext, useContext, useEffect, useMemo, useState, type ReactNode } from "react";
 import { initialChat, mockCourses } from "../data/mock";
-import { api, getErrorMessage } from "../lib/api";
-import type { AdminCoursePayload, ChatMessage, CheckoutSession, ContentBlock, Course, DashboardStats, PurchaseSummary, ReferralRecord, ReferralSummary, Trophy, UserProfile } from "../types";
+import { ApiError, api, getErrorMessage } from "../lib/api";
+import type { AdminCoursePayload, ChatMessage, CheckoutSession, ContentBlock, Course, DashboardStats, EmailDelivery, PurchaseSummary, ReferralRecord, ReferralSummary, Trophy, UserProfile } from "../types";
 
 type AuthForm = {
   email: string;
@@ -12,6 +12,15 @@ type PurchaseForm = {
   provider?: string;
   brand?: string;
   last4?: string;
+};
+
+type AuthActionResult = {
+  error: string | null;
+  message?: string | null;
+  email?: string | null;
+  delivery?: EmailDelivery | null;
+  verificationRequired?: boolean;
+  pendingVerification?: boolean;
 };
 
 type PurchaseResult = {
@@ -32,8 +41,12 @@ type AppContextValue = {
   stats: DashboardStats;
   chatMessages: ChatMessage[];
   authResolved: boolean;
-  login: (form: AuthForm) => Promise<string | null>;
-  register: (form: AuthForm & { name: string }) => Promise<string | null>;
+  login: (form: AuthForm) => Promise<AuthActionResult>;
+  register: (form: AuthForm & { name: string }) => Promise<AuthActionResult>;
+  resendVerification: (email: string) => Promise<AuthActionResult>;
+  requestPasswordReset: (email: string) => Promise<AuthActionResult>;
+  resetPassword: (token: string, password: string) => Promise<AuthActionResult>;
+  verifyEmail: (token: string) => Promise<AuthActionResult>;
   logout: () => Promise<void>;
   updateProfile: (form: { name: string; avatar: string }) => Promise<string | null>;
   completeSection: (courseSlug: string, sectionId: string) => Promise<string | null>;
@@ -157,6 +170,7 @@ const normalizeCourse = (course: any): Course => ({
 const normalizeProfile = (profile: any): UserProfile => ({
   name: profile.name,
   email: profile.email,
+  emailVerified: Boolean(profile.emailVerified),
   avatar: profile.avatar,
   streakDays: Number(profile.streakDays ?? 0),
   referralCode: profile.referralCode,
@@ -289,32 +303,91 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
       chatMessages,
       authResolved,
       login: async ({ email, password }) => {
-        if (!email.includes("@")) return "Email invalido.";
-        if (password.length < 6) return "La contrasena debe tener al menos 6 caracteres.";
+        if (!email.includes("@")) return { error: "Email invalido." };
+        if (password.length < 6) return { error: "La contrasena debe tener al menos 6 caracteres." };
 
         try {
           const response = await api.login({ email, password });
-          setProfile(normalizeProfile(response.profile));
-          await refreshCourses();
-          syncTabs("session");
-          return null;
+          if (response.profile) {
+            setProfile(normalizeProfile(response.profile));
+            await refreshCourses();
+            syncTabs("session");
+          }
+          return { error: null };
         } catch (error) {
-          return getErrorMessage(error, "No se pudo iniciar sesion.");
+          const payload = error instanceof ApiError && typeof error.data === "object" && error.data !== null ? (error.data as Record<string, unknown>) : null;
+          return {
+            error: getErrorMessage(error, "No se pudo iniciar sesion."),
+            verificationRequired: Boolean(payload?.verificationRequired),
+            email: typeof payload?.email === "string" ? payload.email : email
+          };
         }
       },
       register: async ({ name, email, password }) => {
-        if (!name.trim()) return "El nombre es obligatorio.";
-        if (!email.includes("@")) return "Email invalido.";
-        if (password.length < 6) return "La contrasena debe tener al menos 6 caracteres.";
+        if (!name.trim()) return { error: "El nombre es obligatorio." };
+        if (!email.includes("@")) return { error: "Email invalido." };
+        if (password.length < 6) return { error: "La contrasena debe tener al menos 6 caracteres." };
 
         try {
           const response = await api.register({ name, email, password });
+          if (response.profile) {
+            setProfile(normalizeProfile(response.profile));
+            await refreshCourses();
+            syncTabs("session");
+          } else {
+            setProfile(null);
+          }
+          return {
+            error: null,
+            message: response.message ?? null,
+            email: response.email ?? email,
+            delivery: response.delivery ?? null,
+            pendingVerification: Boolean(response.pendingVerification)
+          };
+        } catch (error) {
+          return { error: getErrorMessage(error, "No se pudo crear la cuenta.") };
+        }
+      },
+      resendVerification: async (email) => {
+        if (!email.includes("@")) return { error: "Email invalido." };
+        try {
+          const response = await api.resendVerification({ email });
+          return { error: null, message: response.message ?? null, delivery: response.delivery ?? null, email };
+        } catch (error) {
+          return { error: getErrorMessage(error, "No se pudo reenviar la verificacion."), email };
+        }
+      },
+      requestPasswordReset: async (email) => {
+        if (!email.includes("@")) return { error: "Email invalido." };
+        try {
+          const response = await api.requestPasswordReset({ email });
+          return { error: null, message: response.message ?? null, delivery: response.delivery ?? null, email };
+        } catch (error) {
+          return { error: getErrorMessage(error, "No se pudo iniciar la recuperacion."), email };
+        }
+      },
+      resetPassword: async (token, password) => {
+        if (!token.trim()) return { error: "Falta el token de restablecimiento." };
+        if (password.length < 6) return { error: "La contrasena debe tener al menos 6 caracteres." };
+        try {
+          const response = await api.resetPassword({ token, password });
+          setProfile(null);
+          syncTabs("session");
+          return { error: null, message: response.message ?? null };
+        } catch (error) {
+          return { error: getErrorMessage(error, "No se pudo restablecer la contrasena.") };
+        }
+      },
+      verifyEmail: async (token) => {
+        if (!token.trim()) return { error: "Falta el token de verificacion." };
+        try {
+          const response = await api.verifyEmail(token);
           setProfile(normalizeProfile(response.profile));
           await refreshCourses();
           syncTabs("session");
-          return null;
+          return { error: null, message: response.message ?? null };
         } catch (error) {
-          return getErrorMessage(error, "No se pudo crear la cuenta.");
+          return { error: getErrorMessage(error, "No se pudo verificar el email.") };
         }
       },
       logout: async () => {

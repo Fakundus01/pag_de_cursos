@@ -6,12 +6,15 @@ import { RequireAuth } from "./components/shared/RequireAuth";
 import { AboutPage } from "./pages/AboutPage";
 import { AdminPage } from "./pages/AdminPage";
 import { ContactPage } from "./pages/ContactPage";
+import { ForgotPasswordPage } from "./pages/ForgotPasswordPage";
 import { CoursePlayerPage } from "./pages/CoursePlayerPage";
 import { CoursesPage } from "./pages/CoursesPage";
 import { HomePage } from "./pages/HomePage";
 import { LoginPage } from "./pages/LoginPage";
 import { ProfilePage } from "./pages/ProfilePage";
 import { RegisterPage } from "./pages/RegisterPage";
+import { ResetPasswordPage } from "./pages/ResetPasswordPage";
+import { VerifyEmailPage } from "./pages/VerifyEmailPage";
 
 const App = () => (
   <Routes>
@@ -22,6 +25,9 @@ const App = () => (
       <Route path="/contactanos" element={<ContactPage />} />
       <Route path="/iniciar-sesion" element={<LoginPage />} />
       <Route path="/registrarse" element={<RegisterPage />} />
+      <Route path="/recuperar-contrasena" element={<ForgotPasswordPage />} />
+      <Route path="/restablecer-contrasena" element={<ResetPasswordPage />} />
+      <Route path="/verificar-email" element={<VerifyEmailPage />} />
       <Route
         path="/perfil"
         element={

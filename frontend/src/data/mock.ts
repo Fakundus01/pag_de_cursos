@@ -72,6 +72,7 @@ export const mockTrophies: Trophy[] = [
 export const mockProfile: UserProfile = {
   name: "Sarah Kerrigan",
   email: "sarah@starcraft.academy",
+  emailVerified: true,
   avatar: "SK",
   streakDays: 7,
   referralCode: "ZERG-10",

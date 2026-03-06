@@ -227,7 +227,8 @@ def smtp_from_name() -> str:
 
 
 def email_preview_log_path() -> str:
-    return os.getenv("EMAIL_PREVIEW_LOG_PATH", os.path.join(os.path.dirname(__file__), "instance", "email_previews.log")).strip()
+    configured = os.getenv("EMAIL_PREVIEW_LOG_PATH", "").strip()
+    return configured or os.path.join(os.path.dirname(__file__), "instance", "email_previews.log")
 
 
 def verification_token_lifetime() -> timedelta:
@@ -1796,7 +1797,21 @@ def register_routes(app: Flask) -> None:
         raw_token = request.args.get("token", "").strip()
         token = lookup_auth_token(raw_token, EMAIL_VERIFY_TOKEN_TYPE)
         if token is None:
-            return jsonify({"error": "Verification link is invalid or expired."}), 400
+            existing_token = AuthToken.query.filter_by(token_type=EMAIL_VERIFY_TOKEN_TYPE, token_digest=auth_token_digest(raw_token)).first()
+            if existing_token is None:
+                return jsonify({"error": "Verification link is invalid or expired."}), 400
+            user = db.session.get(User, existing_token.user_id)
+            if user is None or not email_is_verified(user):
+                return jsonify({"error": "Verification link is invalid or expired."}), 400
+            session.clear()
+            session.permanent = True
+            session["user_id"] = user.id
+            return jsonify({
+                "profile": serialize_profile(user),
+                "verified": True,
+                "message": "Email already verified.",
+                "csrfToken": issue_csrf_token(force=True),
+            })
 
         user = db.session.get(User, token.user_id)
         if user is None:
