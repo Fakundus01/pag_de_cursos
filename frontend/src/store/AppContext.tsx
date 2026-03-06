@@ -31,6 +31,7 @@ const emptyStats: DashboardStats = {
 };
 
 const AppContext = createContext<AppContextValue | undefined>(undefined);
+const appSyncStorageKey = "starcraft-academy-sync";
 
 const normalizeTrophy = (trophy: any): Trophy => ({
   id: String(trophy.id),
@@ -86,28 +87,73 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>(initialChat);
   const [authResolved, setAuthResolved] = useState(false);
 
+  const refreshCourses = async () => {
+    try {
+      const courseResponse = await api.courses();
+      setCourses(courseResponse.map(normalizeCourse));
+    } catch {
+      // Keep local fallback catalog if the API is not reachable.
+    }
+  };
+
+  const refreshSession = async () => {
+    try {
+      const meResponse = await api.me();
+      setProfile(meResponse.profile ? normalizeProfile(meResponse.profile) : null);
+    } catch {
+      setProfile(null);
+    } finally {
+      setAuthResolved(true);
+    }
+  };
+
+  const syncTabs = (reason: string) => {
+    if (typeof window === "undefined") {
+      return;
+    }
+
+    try {
+      window.localStorage.setItem(appSyncStorageKey, JSON.stringify({ reason, at: Date.now() }));
+    } catch {
+      // Ignore storage errors and keep local state updates.
+    }
+  };
+
   useEffect(() => {
-    void (async () => {
-      try {
-        const courseResponse = await api.courses();
-        setCourses(courseResponse.map(normalizeCourse));
-      } catch {
-        // Keep local fallback catalog if the API is not reachable.
-      }
-    })();
+    void refreshCourses();
   }, []);
 
   useEffect(() => {
-    void (async () => {
-      try {
-        const meResponse = await api.me();
-        setProfile(meResponse.profile ? normalizeProfile(meResponse.profile) : null);
-      } catch {
-        setProfile(null);
-      } finally {
-        setAuthResolved(true);
+    void refreshSession();
+  }, []);
+
+  useEffect(() => {
+    const refreshVisibleState = () => {
+      void refreshCourses();
+      void refreshSession();
+    };
+
+    const handleStorage = (event: StorageEvent) => {
+      if (event.key === appSyncStorageKey) {
+        refreshVisibleState();
       }
-    })();
+    };
+
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === "visible") {
+        refreshVisibleState();
+      }
+    };
+
+    window.addEventListener("focus", refreshVisibleState);
+    window.addEventListener("storage", handleStorage);
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+
+    return () => {
+      window.removeEventListener("focus", refreshVisibleState);
+      window.removeEventListener("storage", handleStorage);
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
+    };
   }, []);
 
   useEffect(() => {
@@ -146,6 +192,8 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
         try {
           const response = await api.login({ email, password });
           setProfile(normalizeProfile(response.profile));
+          await refreshCourses();
+          syncTabs("session");
           return null;
         } catch (error) {
           return getErrorMessage(error, "No se pudo iniciar sesion.");
@@ -159,6 +207,8 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
         try {
           const response = await api.register({ name, email, password });
           setProfile(normalizeProfile(response.profile));
+          await refreshCourses();
+          syncTabs("session");
           return null;
         } catch (error) {
           return getErrorMessage(error, "No se pudo crear la cuenta.");
@@ -172,6 +222,8 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
         }
         setProfile(null);
         setStats(emptyStats);
+        await refreshCourses();
+        syncTabs("session");
       },
       updateProfile: async ({ name, avatar }) => {
         if (!profile) {
@@ -181,6 +233,7 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
         try {
           const response = await api.updateProfile({ name, avatar });
           setProfile(normalizeProfile(response.profile));
+          syncTabs("profile");
           return null;
         } catch (error) {
           return getErrorMessage(error, "No se pudo actualizar el perfil.");
@@ -194,6 +247,7 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
         try {
           const response = await api.completeSection(courseSlug, { sectionId });
           setProfile(normalizeProfile(response.profile));
+          syncTabs("progress");
           return null;
         } catch (error) {
           return getErrorMessage(error, "No se pudo guardar el progreso.");
