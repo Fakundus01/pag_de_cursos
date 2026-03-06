@@ -1,8 +1,7 @@
 import { createContext, useContext, useEffect, useMemo, useState, type ReactNode } from "react";
-import { initialChat, mockComments, mockCourses, mockProfile, mockStats, mockTrophies } from "../data/mock";
-import { api } from "../lib/api";
-import { loadProgress } from "../lib/storage";
-import type { ChatMessage, Comment, Course, DashboardStats, Trophy, UserProfile } from "../types";
+import { initialChat, mockCourses } from "../data/mock";
+import { api, getErrorMessage } from "../lib/api";
+import type { ChatMessage, Course, DashboardStats, Trophy, UserProfile } from "../types";
 
 type AuthForm = {
   email: string;
@@ -13,18 +12,31 @@ type AppContextValue = {
   courses: Course[];
   profile: UserProfile | null;
   stats: DashboardStats;
-  trophies: Trophy[];
-  comments: Comment[];
   chatMessages: ChatMessage[];
-  progress: Record<string, string[]>;
+  authResolved: boolean;
   login: (form: AuthForm) => Promise<string | null>;
   register: (form: AuthForm & { name: string }) => Promise<string | null>;
   logout: () => Promise<void>;
+  updateProfile: (form: { name: string; avatar: string }) => Promise<string | null>;
+  completeSection: (courseSlug: string, sectionId: string) => Promise<string | null>;
   addChatMessage: (body: string) => void;
-  refreshProgress: () => void;
+};
+
+const emptyStats: DashboardStats = {
+  registeredUsers: 0,
+  activeUsers: 0,
+  guests: 0,
+  monthlyRevenue: 0,
+  premiumEnrollments: 0
 };
 
 const AppContext = createContext<AppContextValue | undefined>(undefined);
+
+const normalizeTrophy = (trophy: any): Trophy => ({
+  id: String(trophy.id),
+  title: trophy.title,
+  detail: trophy.detail
+});
 
 const normalizeCourse = (course: any): Course => ({
   id: String(course.id ?? course.slug),
@@ -33,73 +45,89 @@ const normalizeCourse = (course: any): Course => ({
   subtitle: course.subtitle,
   description: course.description,
   level: course.level,
-  isFree: course.isFree,
-  price: course.price,
-  rating: course.rating,
-  students: course.students,
-  locked: course.locked,
-  tags: course.tags,
-  sections: (course.sections ?? []).map((section: any) => ({
-    id: String(section.id),
-    title: section.title,
-    duration: section.duration
-  }))
+  isFree: Boolean(course.isFree),
+  price: Number(course.price ?? 0),
+  rating: Number(course.rating ?? 0),
+  students: Number(course.students ?? 0),
+  locked: Boolean(course.locked),
+  isUnlocked: Boolean(course.isUnlocked ?? course.isFree),
+  tags: Array.isArray(course.tags) ? course.tags.map(String) : [],
+  sections: Array.isArray(course.sections)
+    ? course.sections.map((section: any) => ({
+        id: String(section.id),
+        title: section.title,
+        duration: section.duration,
+        completed: Boolean(section.completed)
+      }))
+    : []
 });
 
 const normalizeProfile = (profile: any): UserProfile => ({
   name: profile.name,
   email: profile.email,
   avatar: profile.avatar,
-  streakDays: profile.streakDays,
+  streakDays: Number(profile.streakDays ?? 0),
   referralCode: profile.referralCode,
-  enrolledCourseIds: (profile.enrolledCourseIds ?? []).map(String),
-  completedCourseIds: (profile.completedCourseIds ?? []).map(String),
-  savedCards: profile.savedCards,
-  isAdmin: profile.isAdmin
+  enrolledCourseIds: Array.isArray(profile.enrolledCourseIds) ? profile.enrolledCourseIds.map(String) : [],
+  completedCourseIds: Array.isArray(profile.completedCourseIds) ? profile.completedCourseIds.map(String) : [],
+  recommendedCourseIds: Array.isArray(profile.recommendedCourseIds) ? profile.recommendedCourseIds.map(String) : [],
+  savedCards: Array.isArray(profile.savedCards) ? profile.savedCards.map(String) : [],
+  progressByCourse: Object.fromEntries(
+    Object.entries(profile.progressByCourse ?? {}).map(([courseId, sectionIds]) => [courseId, Array.isArray(sectionIds) ? sectionIds.map(String) : []])
+  ),
+  trophies: Array.isArray(profile.trophies) ? profile.trophies.map(normalizeTrophy) : [],
+  isAdmin: Boolean(profile.isAdmin)
 });
 
 export const AppProvider = ({ children }: { children: ReactNode }) => {
   const [courses, setCourses] = useState<Course[]>(mockCourses);
   const [profile, setProfile] = useState<UserProfile | null>(null);
-  const [stats, setStats] = useState<DashboardStats>(mockStats);
+  const [stats, setStats] = useState<DashboardStats>(emptyStats);
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>(initialChat);
-  const [progress, setProgress] = useState<Record<string, string[]>>({});
+  const [authResolved, setAuthResolved] = useState(false);
 
   useEffect(() => {
-    setProgress(loadProgress());
-  }, []);
-
-  useEffect(() => {
-    const onStorage = () => setProgress(loadProgress());
-    window.addEventListener("storage", onStorage);
-    return () => window.removeEventListener("storage", onStorage);
+    void (async () => {
+      try {
+        const courseResponse = await api.courses();
+        setCourses(courseResponse.map(normalizeCourse));
+      } catch {
+        // Keep local fallback catalog if the API is not reachable.
+      }
+    })();
   }, []);
 
   useEffect(() => {
     void (async () => {
       try {
-        const [courseResponse, meResponse] = await Promise.all([api.courses(), api.me()]);
-        setCourses(courseResponse.map(normalizeCourse));
-        if (meResponse.profile) {
-          setProfile(normalizeProfile(meResponse.profile));
-        }
+        const meResponse = await api.me();
+        setProfile(meResponse.profile ? normalizeProfile(meResponse.profile) : null);
       } catch {
-        // Fallback to local demo data when backend is not running.
+        setProfile(null);
+      } finally {
+        setAuthResolved(true);
       }
     })();
   }, []);
 
   useEffect(() => {
     if (!profile?.isAdmin) {
+      setStats(emptyStats);
       return;
     }
 
     void (async () => {
       try {
         const statsResponse = await api.stats();
-        setStats(statsResponse);
+        setStats({
+          registeredUsers: Number(statsResponse.registeredUsers ?? 0),
+          activeUsers: Number(statsResponse.activeUsers ?? 0),
+          guests: Number(statsResponse.guests ?? 0),
+          monthlyRevenue: Number(statsResponse.monthlyRevenue ?? 0),
+          premiumEnrollments: Number(statsResponse.premiumEnrollments ?? 0)
+        });
       } catch {
-        // Keep mock dashboard data as fallback.
+        setStats(emptyStats);
       }
     })();
   }, [profile?.isAdmin]);
@@ -109,46 +137,67 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
       courses,
       profile,
       stats,
-      trophies: mockTrophies,
-      comments: mockComments,
       chatMessages,
-      progress,
+      authResolved,
       login: async ({ email, password }) => {
         if (!email.includes("@")) return "Email invalido.";
         if (password.length < 6) return "La contrasena debe tener al menos 6 caracteres.";
+
         try {
           const response = await api.login({ email, password });
           setProfile(normalizeProfile(response.profile));
           return null;
-        } catch {
-          setProfile(mockProfile);
-          return null;
+        } catch (error) {
+          return getErrorMessage(error, "No se pudo iniciar sesion.");
         }
       },
       register: async ({ name, email, password }) => {
         if (!name.trim()) return "El nombre es obligatorio.";
         if (!email.includes("@")) return "Email invalido.";
         if (password.length < 6) return "La contrasena debe tener al menos 6 caracteres.";
+
         try {
           const response = await api.register({ name, email, password });
           setProfile(normalizeProfile(response.profile));
           return null;
-        } catch {
-          setProfile({
-            ...mockProfile,
-            name,
-            email
-          });
-          return null;
+        } catch (error) {
+          return getErrorMessage(error, "No se pudo crear la cuenta.");
         }
       },
       logout: async () => {
         try {
           await api.logout();
         } catch {
-          // Ignore API logout errors in mock mode.
+          // If the session is already invalid, clear the local state anyway.
         }
         setProfile(null);
+        setStats(emptyStats);
+      },
+      updateProfile: async ({ name, avatar }) => {
+        if (!profile) {
+          return "Debes iniciar sesion para editar tu perfil.";
+        }
+
+        try {
+          const response = await api.updateProfile({ name, avatar });
+          setProfile(normalizeProfile(response.profile));
+          return null;
+        } catch (error) {
+          return getErrorMessage(error, "No se pudo actualizar el perfil.");
+        }
+      },
+      completeSection: async (courseSlug, sectionId) => {
+        if (!profile) {
+          return "Debes iniciar sesion para guardar progreso.";
+        }
+
+        try {
+          const response = await api.completeSection(courseSlug, { sectionId });
+          setProfile(normalizeProfile(response.profile));
+          return null;
+        } catch (error) {
+          return getErrorMessage(error, "No se pudo guardar el progreso.");
+        }
       },
       addChatMessage: (body) => {
         const userMessage: ChatMessage = {
@@ -168,10 +217,9 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
           body: answer
         };
         setChatMessages((current) => [...current, userMessage, assistantMessage]);
-      },
-      refreshProgress: () => setProgress(loadProgress())
+      }
     }),
-    [chatMessages, courses, profile, progress, stats]
+    [authResolved, chatMessages, courses, profile, stats]
   );
 
   return <AppContext.Provider value={value}>{children}</AppContext.Provider>;
@@ -184,4 +232,3 @@ export const useAppContext = () => {
   }
   return context;
 };
-

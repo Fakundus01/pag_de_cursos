@@ -5,6 +5,12 @@ export type CourseSection = {
   completed?: boolean;
 };
 
+export type Activity = {
+  title: string;
+  prompt: string;
+  questions: string[];
+};
+
 export type Course = {
   id: string;
   slug: string;
@@ -17,8 +23,22 @@ export type Course = {
   rating: number;
   students: number;
   locked: boolean;
+  isUnlocked?: boolean;
   tags: string[];
   sections: CourseSection[];
+};
+
+export type Comment = {
+  id: number;
+  user: string;
+  courseId: string;
+  body: string;
+  stars: number;
+};
+
+export type CourseDetail = Course & {
+  comments: Comment[];
+  activity: Activity;
 };
 
 export type Trophy = {
@@ -35,7 +55,10 @@ export type UserProfile = {
   referralCode: string;
   enrolledCourseIds: string[];
   completedCourseIds: string[];
+  recommendedCourseIds: string[];
   savedCards: string[];
+  progressByCourse: Record<string, string[]>;
+  trophies: Trophy[];
   isAdmin: boolean;
 };
 
@@ -45,14 +68,6 @@ export type DashboardStats = {
   guests: number;
   monthlyRevenue: number;
   premiumEnrollments: number;
-};
-
-export type Comment = {
-  id: number;
-  user: string;
-  courseId: string;
-  body: string;
-  stars: number;
 };
 
 export type ChatMessage = {

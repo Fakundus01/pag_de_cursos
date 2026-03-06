@@ -49,7 +49,7 @@ def seed_data() -> None:
         rating=4.8,
         students=1420,
         locked=False,
-        tags="Build orders,Economia,Gratis"
+        tags="Build orders,Economia,Gratis",
     )
     zerg = Course(
         slug="zerg-ladder-control",
@@ -62,7 +62,7 @@ def seed_data() -> None:
         rating=4.9,
         students=312,
         locked=True,
-        tags="Premium,IA,Actividades"
+        tags="Premium,IA,Actividades",
     )
     protoss = Course(
         slug="protoss-pressure",
@@ -75,7 +75,7 @@ def seed_data() -> None:
         rating=4.7,
         students=204,
         locked=True,
-        tags="Premium,Minijuegos,Analitica"
+        tags="Premium,Minijuegos,Analitica",
     )
     db.session.add_all([terran, zerg, protoss])
     db.session.flush()
@@ -89,7 +89,7 @@ def seed_data() -> None:
         CourseSection(course_id=zerg.id, title="Mid game transitions", duration="18 min", position=3),
         CourseSection(course_id=protoss.id, title="Warp prism windows", duration="14 min", position=1),
         CourseSection(course_id=protoss.id, title="Pressure without overcommit", duration="17 min", position=2),
-        CourseSection(course_id=protoss.id, title="Replay review method", duration="13 min", position=3)
+        CourseSection(course_id=protoss.id, title="Replay review method", duration="13 min", position=3),
     ]
     db.session.add_all(sections)
 
@@ -100,32 +100,107 @@ def seed_data() -> None:
         avatar="SK",
         streak_days=7,
         referral_code="ZERG-10",
-        is_admin=True
+        is_admin=True,
     )
     db.session.add(admin)
     db.session.flush()
 
     enrollments = [
         Enrollment(user_id=admin.id, course_id=terran.id, progress_percent=100, is_completed=True, purchased=True),
-        Enrollment(user_id=admin.id, course_id=zerg.id, progress_percent=35, is_completed=False, purchased=True)
+        Enrollment(user_id=admin.id, course_id=zerg.id, progress_percent=35, is_completed=False, purchased=True),
     ]
     db.session.add_all(enrollments)
     db.session.flush()
 
     terran_sections = CourseSection.query.filter_by(course_id=terran.id).all()
+    zerg_section = CourseSection.query.filter_by(course_id=zerg.id).order_by(CourseSection.position.asc()).first()
     for section in terran_sections:
         db.session.add(Progress(enrollment_id=enrollments[0].id, section_id=section.id))
+    if zerg_section is not None:
+        db.session.add(Progress(enrollment_id=enrollments[1].id, section_id=zerg_section.id))
 
-    db.session.add_all([
-        PaymentMethod(user_id=admin.id, brand="Visa", last4="4242"),
-        PaymentMethod(user_id=admin.id, brand="Mastercard", last4="1288"),
-        Comment(user_id=admin.id, course_id=terran.id, body="La doc gratuita ya muestra bastante nivel.", stars=5),
-        Comment(user_id=admin.id, course_id=zerg.id, body="Las practicas dinamicas ayudan a fijar timings.", stars=5)
-    ])
+    db.session.add_all(
+        [
+            PaymentMethod(user_id=admin.id, brand="Visa", last4="4242"),
+            PaymentMethod(user_id=admin.id, brand="Mastercard", last4="1288"),
+            Comment(user_id=admin.id, course_id=terran.id, body="La doc gratuita ya muestra bastante nivel.", stars=5),
+            Comment(user_id=admin.id, course_id=zerg.id, body="Las practicas dinamicas ayudan a fijar timings.", stars=5),
+        ]
+    )
     db.session.commit()
 
 
-def serialize_course(course: Course) -> dict:
+def serialize_comment(comment: Comment) -> dict:
+    return {
+        "id": comment.id,
+        "user": comment.user.name,
+        "courseId": comment.course.slug,
+        "body": comment.body,
+        "stars": comment.stars,
+    }
+
+
+def build_activity(course: Course) -> dict:
+    race = course.title.split()[0]
+    return {
+        "title": f"Actividad dinamica de {race}",
+        "prompt": f"Analiza un escenario del curso {course.title} y explica la mejor decision antes del minuto 5.",
+        "questions": [
+            "Que viste en el scouting inicial?",
+            "Que ajuste de build corresponde?",
+            "Cual es el riesgo si reaccionas tarde?",
+        ],
+    }
+
+
+def progress_map_for_user(user: User) -> dict[str, list[str]]:
+    return {
+        enrollment.course.slug: [str(progress.section_id) for progress in enrollment.progress_items]
+        for enrollment in user.enrollments
+    }
+
+
+def build_trophies(user: User) -> list[dict]:
+    trophies: list[dict] = []
+    completed_courses = [enrollment for enrollment in user.enrollments if enrollment.is_completed]
+    total_progress = sum(len(enrollment.progress_items) for enrollment in user.enrollments)
+
+    if user.streak_days >= 3:
+        trophies.append(
+            {
+                "id": "streak",
+                "title": f"Cadena de {user.streak_days} dias",
+                "detail": "Mantuviste una racha activa de inicio de sesion.",
+            }
+        )
+    if completed_courses:
+        trophies.append(
+            {
+                "id": "first-course",
+                "title": "Primer curso completado",
+                "detail": "Terminaste al menos una ruta del campus.",
+            }
+        )
+    if total_progress >= 3:
+        trophies.append(
+            {
+                "id": "strategist",
+                "title": "Estratega",
+                "detail": "Completaste varias secciones y mantuviste el progreso.",
+            }
+        )
+
+    return trophies
+
+
+def serialize_course(course: Course, user: User | None = None) -> dict:
+    enrollment = None
+    if user is not None:
+        enrollment = next((item for item in user.enrollments if item.course_id == course.id), None)
+
+    is_unlocked = course.is_free or bool(enrollment and enrollment.purchased)
+    completed_section_ids = [str(progress.section_id) for progress in enrollment.progress_items] if enrollment else []
+
     return {
         "id": course.slug,
         "slug": course.slug,
@@ -138,28 +213,38 @@ def serialize_course(course: Course) -> dict:
         "rating": course.rating,
         "students": course.students,
         "locked": course.locked,
+        "isUnlocked": is_unlocked,
         "tags": [tag for tag in course.tags.split(",") if tag],
         "sections": [
             {
                 "id": str(section.id),
                 "title": section.title,
                 "duration": section.duration,
+                "completed": str(section.id) in completed_section_ids,
             }
             for section in sorted(course.sections, key=lambda item: item.position)
-        ]
+        ],
     }
 
 
 def serialize_profile(user: User) -> dict:
+    courses = Course.query.order_by(Course.is_free.desc(), Course.title.asc()).all()
+    enrolled_ids = [enrollment.course.slug for enrollment in user.enrollments]
+    completed_ids = [enrollment.course.slug for enrollment in user.enrollments if enrollment.is_completed]
+    recommended_ids = [course.slug for course in courses if course.slug not in enrolled_ids]
+
     return {
         "name": user.name,
         "email": user.email,
         "avatar": user.avatar,
         "streakDays": user.streak_days,
         "referralCode": user.referral_code,
-        "enrolledCourseIds": [enrollment.course.slug for enrollment in user.enrollments],
-        "completedCourseIds": [enrollment.course.slug for enrollment in user.enrollments if enrollment.is_completed],
+        "enrolledCourseIds": enrolled_ids,
+        "completedCourseIds": completed_ids,
+        "recommendedCourseIds": recommended_ids,
         "savedCards": [f"{method.brand} terminada en {method.last4}" for method in user.payment_methods],
+        "progressByCourse": progress_map_for_user(user),
+        "trophies": build_trophies(user),
         "isAdmin": user.is_admin,
     }
 
@@ -200,6 +285,26 @@ def validate_email_address(value: str) -> str:
     return normalized
 
 
+def get_or_create_enrollment(user: User, course: Course) -> Enrollment | None:
+    enrollment = Enrollment.query.filter_by(user_id=user.id, course_id=course.id).first()
+    if enrollment is not None:
+        return enrollment
+    if not course.is_free:
+        return None
+
+    enrollment = Enrollment(user_id=user.id, course_id=course.id, purchased=True)
+    db.session.add(enrollment)
+    db.session.flush()
+    return enrollment
+
+
+def update_enrollment_progress(enrollment: Enrollment) -> None:
+    total_sections = len(enrollment.course.sections)
+    completed_sections = Progress.query.filter_by(enrollment_id=enrollment.id).count()
+    enrollment.progress_percent = 0 if total_sections == 0 else round((completed_sections / total_sections) * 100)
+    enrollment.is_completed = total_sections > 0 and completed_sections >= total_sections
+
+
 def register_routes(app: Flask) -> None:
     @app.get("/api/health")
     def health():
@@ -207,17 +312,17 @@ def register_routes(app: Flask) -> None:
 
     @app.get("/api/courses")
     def get_courses():
+        user = current_user()
         courses = Course.query.order_by(Course.is_free.desc(), Course.title.asc()).all()
-        return jsonify([serialize_course(course) for course in courses])
+        return jsonify([serialize_course(course, user) for course in courses])
 
     @app.get("/api/courses/<slug>")
     def get_course(slug: str):
+        user = current_user()
         course = Course.query.filter_by(slug=slug).first_or_404()
-        payload = serialize_course(course)
-        payload["comments"] = [
-            {"user": comment.user.name, "body": comment.body, "stars": comment.stars}
-            for comment in course.comments
-        ]
+        payload = serialize_course(course, user)
+        payload["comments"] = [serialize_comment(comment) for comment in course.comments]
+        payload["activity"] = build_activity(course)
         return jsonify(payload)
 
     @app.post("/api/auth/register")
@@ -253,7 +358,7 @@ def register_routes(app: Flask) -> None:
         db.session.flush()
 
         free_course = Course.query.filter_by(is_free=True).first()
-        if free_course:
+        if free_course is not None:
             db.session.add(Enrollment(user_id=user.id, course_id=free_course.id, purchased=True))
 
         db.session.commit()
@@ -280,7 +385,7 @@ def register_routes(app: Flask) -> None:
     @app.get("/api/auth/me")
     def me():
         user = current_user()
-        if not user:
+        if user is None:
             return jsonify({"profile": None})
         return jsonify({"profile": serialize_profile(user)})
 
@@ -294,14 +399,42 @@ def register_routes(app: Flask) -> None:
     def update_profile(user: User):
         data = request.get_json(force=True)
         user.name = data.get("name", user.name).strip() or user.name
-        user.avatar = data.get("avatar", user.avatar).strip() or user.avatar
+        user.avatar = data.get("avatar", user.avatar).strip()[:8] or user.avatar
+        db.session.commit()
+        return jsonify({"profile": serialize_profile(user)})
+
+    @app.post("/api/courses/<slug>/progress")
+    @login_required
+    def complete_section(user: User, slug: str):
+        data = request.get_json(force=True)
+        section_id = str(data.get("sectionId", "")).strip()
+        if not section_id:
+            return jsonify({"error": "Section id is required"}), 400
+
+        course = Course.query.filter_by(slug=slug).first_or_404()
+        enrollment = get_or_create_enrollment(user, course)
+        if enrollment is None or (not course.is_free and not enrollment.purchased):
+            return jsonify({"error": "Course is locked for this user"}), 403
+
+        section = CourseSection.query.filter_by(id=section_id, course_id=course.id).first()
+        if section is None:
+            return jsonify({"error": "Section does not belong to this course"}), 400
+
+        existing = Progress.query.filter_by(enrollment_id=enrollment.id, section_id=section.id).first()
+        if existing is None:
+            db.session.add(Progress(enrollment_id=enrollment.id, section_id=section.id))
+            db.session.flush()
+
+        update_enrollment_progress(enrollment)
         db.session.commit()
         return jsonify({"profile": serialize_profile(user)})
 
     @app.get("/api/admin/stats")
     @admin_required
     def admin_stats(user: User):
-        revenue = sum(course.price for course in Course.query.filter_by(is_free=False).all() for enrollment in course.enrollments if enrollment.purchased)
+        revenue = sum(
+            course.price for course in Course.query.filter_by(is_free=False).all() for enrollment in course.enrollments if enrollment.purchased
+        )
         premium_enrollments = Enrollment.query.filter_by(purchased=True).join(Course).filter(Course.is_free.is_(False)).count()
         return jsonify(
             {
@@ -316,8 +449,8 @@ def register_routes(app: Flask) -> None:
     @app.post("/api/activities/generate")
     def generate_activity():
         data = request.get_json(force=True)
-        race = data.get("race", "Terran")
         topic = data.get("topic", "macro discipline")
+        race = data.get("race", "Terran")
         return jsonify(
             {
                 "title": f"Actividad dinamica de {race}",
@@ -334,10 +467,15 @@ def register_routes(app: Flask) -> None:
     @login_required
     def add_comment(user: User, slug: str):
         course = Course.query.filter_by(slug=slug).first_or_404()
+        enrollment = get_or_create_enrollment(user, course)
+        if enrollment is None or (not course.is_free and not enrollment.purchased):
+            return jsonify({"error": "Course is locked for this user"}), 403
+
         data = request.get_json(force=True)
         body = data.get("body", "").strip()
         if not body:
             return jsonify({"error": "Comment body is required"}), 400
+
         comment = Comment(
             user_id=user.id,
             course_id=course.id,
@@ -346,7 +484,7 @@ def register_routes(app: Flask) -> None:
         )
         db.session.add(comment)
         db.session.commit()
-        return jsonify({"ok": True}), 201
+        return jsonify({"comment": serialize_comment(comment)}), 201
 
 
 app = create_app()
@@ -354,3 +492,4 @@ app = create_app()
 
 if __name__ == "__main__":
     app.run(port=5000, debug=True)
+

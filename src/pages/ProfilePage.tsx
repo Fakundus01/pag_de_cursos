@@ -1,14 +1,36 @@
 import { Award, CreditCard, Percent, Trophy, UserRoundCheck } from "lucide-react";
+import { useEffect, useMemo, useState } from "react";
 import { useAppContext } from "../store/AppContext";
 
 export const ProfilePage = () => {
-  const { profile, courses, trophies, progress } = useAppContext();
+  const { profile, courses, updateProfile } = useAppContext();
+  const [name, setName] = useState("");
+  const [avatar, setAvatar] = useState("");
+  const [message, setMessage] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    if (!profile) {
+      return;
+    }
+    setName(profile.name);
+    setAvatar(profile.avatar);
+  }, [profile]);
+
+  const enrolledCourses = useMemo(
+    () => (profile ? courses.filter((course) => profile.enrolledCourseIds.includes(course.id)) : []),
+    [courses, profile]
+  );
+  const completedCourses = useMemo(
+    () => (profile ? courses.filter((course) => profile.completedCourseIds.includes(course.id)) : []),
+    [courses, profile]
+  );
+  const recommendedCourses = useMemo(
+    () => (profile ? courses.filter((course) => profile.recommendedCourseIds.includes(course.id)) : []),
+    [courses, profile]
+  );
 
   if (!profile) return null;
-
-  const enrolledCourses = courses.filter((course) => profile.enrolledCourseIds.includes(course.id));
-  const completedCourses = courses.filter((course) => profile.completedCourseIds.includes(course.id));
-  const recommendedCourses = courses.filter((course) => !profile.enrolledCourseIds.includes(course.id));
 
   return (
     <div className="space-y-8 pb-16">
@@ -24,11 +46,23 @@ export const ProfilePage = () => {
             </div>
           </div>
 
-          <div className="mt-7 grid gap-3">
-            <div className="rounded-2xl bg-abyss/60 px-4 py-3 text-sm">Perfil editable, avatar, bio, idioma y preferencias de estudio.</div>
-            <div className="rounded-2xl bg-abyss/60 px-4 py-3 text-sm">Sesion persistente con cookies y email validado desde backend.</div>
-            <div className="rounded-2xl bg-abyss/60 px-4 py-3 text-sm">Cards guardadas para autocompletar futuras compras.</div>
-          </div>
+          <form
+            className="mt-7 grid gap-3"
+            onSubmit={async (event) => {
+              event.preventDefault();
+              setSaving(true);
+              const result = await updateProfile({ name, avatar });
+              setSaving(false);
+              setMessage(result ?? "Perfil actualizado correctamente.");
+            }}
+          >
+            <input value={name} onChange={(event) => setName(event.target.value)} className="rounded-2xl border border-white/10 bg-abyss/60 px-4 py-3 outline-none" placeholder="Nombre visible" />
+            <input value={avatar} onChange={(event) => setAvatar(event.target.value.slice(0, 8).toUpperCase())} className="rounded-2xl border border-white/10 bg-abyss/60 px-4 py-3 outline-none" placeholder="Avatar corto" />
+            <button disabled={saving} className="rounded-full bg-sand px-5 py-3 text-sm font-medium text-abyss disabled:opacity-60">
+              {saving ? "Guardando..." : "Guardar perfil"}
+            </button>
+            {message && <p className="rounded-2xl bg-white/5 px-4 py-3 text-sm text-steel">{message}</p>}
+          </form>
         </div>
 
         <div className="grid gap-4 md:grid-cols-3">
@@ -55,7 +89,7 @@ export const ProfilePage = () => {
           <h2 className="text-2xl font-semibold text-sand">Tus cursos</h2>
           <div className="mt-6 grid gap-4 md:grid-cols-2">
             {enrolledCourses.map((course) => {
-              const percentage = Math.round(((progress[course.id]?.length ?? 0) / course.sections.length) * 100);
+              const percentage = course.sections.length === 0 ? 0 : Math.round(((profile.progressByCourse[course.id]?.length ?? 0) / course.sections.length) * 100);
               return (
                 <div key={course.id} className="rounded-[24px] bg-abyss/70 p-5">
                   <p className="text-lg font-semibold text-sand">{course.title}</p>
@@ -96,6 +130,7 @@ export const ProfilePage = () => {
                 <p className="text-xs text-steel">{course.level}</p>
               </div>
             ))}
+            {!recommendedCourses.length && <p className="text-sm text-steel">No hay recomendaciones nuevas por ahora.</p>}
           </div>
         </div>
 
@@ -108,6 +143,7 @@ export const ProfilePage = () => {
                 <p className="text-xs text-steel">Completado</p>
               </div>
             ))}
+            {!completedCourses.length && <p className="text-sm text-steel">Todavia no completaste cursos.</p>}
           </div>
         </div>
 
@@ -117,12 +153,13 @@ export const ProfilePage = () => {
             <h2 className="text-xl font-semibold text-sand">Trofeos</h2>
           </div>
           <div className="mt-5 space-y-3">
-            {trophies.map((trophy) => (
+            {profile.trophies.map((trophy) => (
               <div key={trophy.id} className="rounded-2xl bg-abyss/60 px-4 py-3">
                 <p>{trophy.title}</p>
                 <p className="text-xs text-steel">{trophy.detail}</p>
               </div>
             ))}
+            {!profile.trophies.length && <p className="text-sm text-steel">Aun no desbloqueaste trofeos.</p>}
           </div>
         </div>
       </section>

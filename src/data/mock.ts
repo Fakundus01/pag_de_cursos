@@ -13,6 +13,7 @@ export const mockCourses: Course[] = [
     rating: 4.8,
     students: 1420,
     locked: false,
+    isUnlocked: true,
     tags: ["Build orders", "Economia", "Gratis"],
     sections: [
       { id: "f1", title: "Vision general de Terran", duration: "8 min" },
@@ -32,6 +33,7 @@ export const mockCourses: Course[] = [
     rating: 4.9,
     students: 312,
     locked: true,
+    isUnlocked: false,
     tags: ["Premium", "IA", "Actividades"],
     sections: [
       { id: "z1", title: "Overlord paths", duration: "11 min" },
@@ -51,6 +53,7 @@ export const mockCourses: Course[] = [
     rating: 4.7,
     students: 204,
     locked: true,
+    isUnlocked: false,
     tags: ["Premium", "Minijuegos", "Analitica"],
     sections: [
       { id: "p1", title: "Warp prism windows", duration: "14 min" },
@@ -58,6 +61,12 @@ export const mockCourses: Course[] = [
       { id: "p3", title: "Replay review method", duration: "13 min" }
     ]
   }
+];
+
+export const mockTrophies: Trophy[] = [
+  { id: "t1", title: "Cadena de 7 dias", detail: "Iniciaste sesion durante una semana." },
+  { id: "t2", title: "Primer curso", detail: "Completaste tu primer ruta gratuita." },
+  { id: "t3", title: "Estratega", detail: "Terminaste un minijuego de decision tactica." }
 ];
 
 export const mockProfile: UserProfile = {
@@ -68,15 +77,15 @@ export const mockProfile: UserProfile = {
   referralCode: "ZERG-10",
   enrolledCourseIds: ["fundamentos-terran", "zerg-ladder-control"],
   completedCourseIds: ["fundamentos-terran"],
+  recommendedCourseIds: ["protoss-pressure"],
   savedCards: ["Visa terminada en 4242", "Mastercard terminada en 1288"],
+  progressByCourse: {
+    "fundamentos-terran": ["f1", "f2", "f3"],
+    "zerg-ladder-control": ["z1"]
+  },
+  trophies: mockTrophies,
   isAdmin: true
 };
-
-export const mockTrophies: Trophy[] = [
-  { id: "t1", title: "Cadena de 7 dias", detail: "Iniciaste sesion durante una semana." },
-  { id: "t2", title: "Primer curso", detail: "Completaste tu primer ruta gratuita." },
-  { id: "t3", title: "Estratega", detail: "Terminaste un minijuego de decision tactica." }
-];
 
 export const mockStats: DashboardStats = {
   registeredUsers: 1842,

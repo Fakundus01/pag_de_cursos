@@ -3,13 +3,20 @@ import { Link } from "react-router-dom";
 import { useTranslation } from "react-i18next";
 import { CourseCard } from "../components/shared/CourseCard";
 import { CourseDropdown } from "../components/shared/CourseDropdown";
+import { PageLoader } from "../components/shared/PageLoader";
 import { SectionHeading } from "../components/shared/SectionHeading";
 import { useAppContext } from "../store/AppContext";
 
 export const HomePage = () => {
   const { t } = useTranslation();
-  const { courses, progress } = useAppContext();
-  const freeCourse = courses.find((course) => course.isFree)!;
+  const { courses, profile } = useAppContext();
+
+  if (!courses.length) {
+    return <PageLoader />;
+  }
+
+  const progress = profile?.progressByCourse ?? {};
+  const freeCourse = courses.find((course) => course.isFree) ?? courses[0];
   const premiumCourses = courses.filter((course) => !course.isFree);
 
   return (
@@ -63,7 +70,7 @@ export const HomePage = () => {
             </div>
 
             <div className="mt-6 rounded-3xl bg-gradient-to-r from-aurora/20 to-flare/20 p-4 text-sm text-white">
-              Al completar una seccion desde la ventana del curso, el home actualiza el progreso automaticamente.
+              {profile ? "Tu progreso se sincroniza con el backend en cada seccion completada." : "Inicia sesion para que el progreso quede guardado en tu perfil."}
             </div>
           </div>
         </div>
@@ -79,7 +86,7 @@ export const HomePage = () => {
           {courses.map((course) => {
             const completedSections = progress[course.id]?.length ?? 0;
             const sectionCount = course.sections.length;
-            const percentage = Math.round((completedSections / sectionCount) * 100);
+            const percentage = sectionCount === 0 ? 0 : Math.round((completedSections / sectionCount) * 100);
             return <CourseCard key={course.id} course={course} progress={percentage} />;
           })}
         </div>
@@ -90,21 +97,21 @@ export const HomePage = () => {
           <CheckCircle2 className="text-aurora" />
           <h3 className="mt-4 text-xl font-semibold text-sand">Actividades variables</h3>
           <p className="mt-3 text-sm leading-7 text-steel">
-            Base para actividades generadas por IA entrenada con conocimiento de StarCraft y formularios creados por el equipo.
+            El detalle del curso ya consume una actividad dinamica desde Flask y deja preparada la integracion con IA real.
           </p>
         </div>
         <div className="rounded-[30px] border border-white/10 bg-white/5 p-6">
           <LockKeyhole className="text-flare" />
           <h3 className="mt-4 text-xl font-semibold text-sand">Pago y desbloqueo</h3>
           <p className="mt-3 text-sm leading-7 text-steel">
-            Estructura preparada para Mercado Pago, Visa y Mastercard con cards guardadas y programa de referidos.
+            La API ya diferencia acceso libre y premium, para que el siguiente paso sea enchufar el pago y desbloqueo real.
           </p>
         </div>
         <div className="rounded-[30px] border border-white/10 bg-white/5 p-6">
           <ArrowRight className="text-sand" />
           <h3 className="mt-4 text-xl font-semibold text-sand">Seguimiento y trofeos</h3>
           <p className="mt-3 text-sm leading-7 text-steel">
-            Recomendaciones, cursos completados, dias seguidos, minijuegos y progreso por curso desde el perfil.
+            El perfil ahora usa progreso, recomendaciones y trofeos entregados por backend en vez de solo datos simulados.
           </p>
         </div>
       </section>
@@ -125,8 +132,8 @@ export const HomePage = () => {
               <p className="mt-3 text-sm text-steel">{course.description}</p>
               <div className="mt-4 flex items-center justify-between text-sm">
                 <span className="text-white">USD {course.price}</span>
-                <Link to="/registrarse" className="text-aurora">
-                  Crear cuenta
+                <Link to={profile ? "/perfil" : "/registrarse"} className="text-aurora">
+                  {profile ? "Ver perfil" : "Crear cuenta"}
                 </Link>
               </div>
             </div>
@@ -136,4 +143,3 @@ export const HomePage = () => {
     </div>
   );
 };
-

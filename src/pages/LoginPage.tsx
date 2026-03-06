@@ -7,6 +7,7 @@ export const LoginPage = () => {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState<string | null>(null);
+  const [loading, setLoading] = useState(false);
 
   if (profile) {
     return <Navigate to="/perfil" replace />;
@@ -16,13 +17,15 @@ export const LoginPage = () => {
     <div className="mx-auto max-w-md rounded-[34px] border border-white/10 bg-white/5 p-8 shadow-glow">
       <p className="text-sm uppercase tracking-[0.35em] text-aurora">Acceso</p>
       <h1 className="mt-3 text-3xl font-semibold text-sand">Iniciar sesion</h1>
-      <p className="mt-3 text-sm leading-7 text-steel">Base preparada para auth con cookies, validacion de email y sesiones persistentes.</p>
+      <p className="mt-3 text-sm leading-7 text-steel">Autenticacion conectada con cookies y validacion real desde Flask.</p>
 
       <form
         className="mt-8 grid gap-4"
         onSubmit={async (event) => {
           event.preventDefault();
+          setLoading(true);
           setError(await login({ email, password }));
+          setLoading(false);
         }}
       >
         <input
@@ -40,7 +43,9 @@ export const LoginPage = () => {
           className="rounded-2xl border border-white/10 bg-white/5 px-4 py-3 outline-none"
         />
         {error && <p className="rounded-2xl bg-red-500/10 px-4 py-3 text-sm text-red-200">{error}</p>}
-        <button className="rounded-full bg-sand px-5 py-3 font-medium text-abyss">Entrar</button>
+        <button disabled={loading} className="rounded-full bg-sand px-5 py-3 font-medium text-abyss disabled:opacity-60">
+          {loading ? "Entrando..." : "Entrar"}
+        </button>
       </form>
 
       <p className="mt-5 text-sm text-steel">

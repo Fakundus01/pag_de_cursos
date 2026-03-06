@@ -28,23 +28,25 @@ export const CourseDropdown = () => {
         >
           <p className="mb-3 text-xs uppercase tracking-[0.25em] text-aurora">Cursos disponibles</p>
           <div className="space-y-2">
-            {courses.map((course) => (
-              <Link
-                key={course.id}
-                to="/cursos"
-                className="flex items-center justify-between rounded-2xl border border-white/5 bg-white/5 px-4 py-3 text-sm transition hover:border-aurora/35 hover:bg-white/[0.08]"
-              >
-                <div>
-                  <p className="font-medium text-sand">{course.title}</p>
-                  <p className="text-xs text-steel">{course.isFree ? "Acceso gratis" : `USD ${course.price}`}</p>
-                </div>
-                {course.locked ? <LockKeyhole size={16} className="text-flare" /> : <span className="text-xs text-aurora">Free</span>}
-              </Link>
-            ))}
+            {courses.map((course) => {
+              const showLocked = course.locked && !course.isUnlocked;
+              return (
+                <Link
+                  key={course.id}
+                  to="/cursos"
+                  className="flex items-center justify-between rounded-2xl border border-white/5 bg-white/5 px-4 py-3 text-sm transition hover:border-aurora/35 hover:bg-white/[0.08]"
+                >
+                  <div>
+                    <p className="font-medium text-sand">{course.title}</p>
+                    <p className="text-xs text-steel">{course.isFree ? "Acceso gratis" : `USD ${course.price}`}</p>
+                  </div>
+                  {showLocked ? <LockKeyhole size={16} className="text-flare" /> : <span className="text-xs text-aurora">Abierto</span>}
+                </Link>
+              );
+            })}
           </div>
         </div>
       )}
     </div>
   );
 };
-
