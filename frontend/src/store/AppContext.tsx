@@ -1,7 +1,7 @@
 import { createContext, useContext, useEffect, useMemo, useState, type ReactNode } from "react";
 import { initialChat, mockCourses } from "../data/mock";
 import { api, getErrorMessage } from "../lib/api";
-import type { AdminCoursePayload, ChatMessage, ContentBlock, Course, DashboardStats, PurchaseSummary, ReferralRecord, ReferralSummary, Trophy, UserProfile } from "../types";
+import type { AdminCoursePayload, ChatMessage, CheckoutSession, ContentBlock, Course, DashboardStats, PurchaseSummary, ReferralRecord, ReferralSummary, Trophy, UserProfile } from "../types";
 
 type AuthForm = {
   email: string;
@@ -19,6 +19,13 @@ type PurchaseResult = {
   course: Course | null;
 };
 
+type CheckoutResult = {
+  error: string | null;
+  course: Course | null;
+  purchase: PurchaseSummary | null;
+  checkout: CheckoutSession | null;
+};
+
 type AppContextValue = {
   courses: Course[];
   profile: UserProfile | null;
@@ -31,6 +38,9 @@ type AppContextValue = {
   updateProfile: (form: { name: string; avatar: string }) => Promise<string | null>;
   completeSection: (courseSlug: string, sectionId: string) => Promise<string | null>;
   purchaseCourse: (courseSlug: string, form?: PurchaseForm) => Promise<PurchaseResult>;
+  startCheckout: (courseSlug: string, form?: PurchaseForm) => Promise<CheckoutResult>;
+  refreshCheckout: (reference: string) => Promise<CheckoutResult>;
+  confirmDemoPayment: (reference: string) => Promise<CheckoutResult>;
   createAdminCourse: (payload: AdminCoursePayload) => Promise<{ error: string | null; course: Course | null }>;
   addChatMessage: (body: string) => void;
 };
@@ -77,6 +87,20 @@ const normalizePurchase = (purchase: any): PurchaseSummary => ({
   totalAmount: Number(purchase.totalAmount ?? 0),
   createdAt: purchase.createdAt ?? null,
   paidAt: purchase.paidAt ?? null
+});
+
+const normalizeCheckout = (checkout: any): CheckoutSession => ({
+  reference: String(checkout.reference ?? ""),
+  provider: checkout.provider ?? "Mercado Pago",
+  status: checkout.status ?? "pending",
+  currency: checkout.currency ?? "USD",
+  amount: Number(checkout.amount ?? 0),
+  discountAmount: Number(checkout.discountAmount ?? 0),
+  sandboxMode: Boolean(checkout.sandboxMode),
+  nextAction: checkout.nextAction ?? "redirect",
+  statusUrl: checkout.statusUrl ?? "",
+  webhookPath: checkout.webhookPath ?? "",
+  successUrl: checkout.successUrl ?? ""
 });
 
 const normalizeReferralRecord = (referral: any): ReferralRecord => ({
@@ -346,6 +370,69 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
           return { error: null, course: normalizedCourse };
         } catch (error) {
           return { error: getErrorMessage(error, "No se pudo procesar la compra."), course: null };
+        }
+      },
+      startCheckout: async (courseSlug, form = {}) => {
+        if (!profile) {
+          return { error: "Debes iniciar sesion para iniciar el checkout.", course: null, purchase: null, checkout: null };
+        }
+
+        try {
+          const response = await api.createCheckout(courseSlug, form);
+          const normalizedCourse = normalizeCourse(response.course);
+          const normalizedPurchase = response.purchase ? normalizePurchase(response.purchase) : null;
+          const normalizedCheckout = response.checkout ? normalizeCheckout(response.checkout) : null;
+          mergeCourse(normalizedCourse);
+          if (normalizedPurchase?.status === "paid") {
+            const profileResponse = await api.profile();
+            setProfile(normalizeProfile(profileResponse.profile));
+            syncTabs("purchase");
+          } else {
+            syncTabs("checkout");
+          }
+          return { error: null, course: normalizedCourse, purchase: normalizedPurchase, checkout: normalizedCheckout };
+        } catch (error) {
+          return { error: getErrorMessage(error, "No se pudo iniciar el checkout."), course: null, purchase: null, checkout: null };
+        }
+      },
+      refreshCheckout: async (reference) => {
+        if (!profile) {
+          return { error: "Debes iniciar sesion para verificar el pago.", course: null, purchase: null, checkout: null };
+        }
+
+        try {
+          const response = await api.paymentStatus(reference);
+          const normalizedCourse = normalizeCourse(response.course);
+          const normalizedPurchase = response.purchase ? normalizePurchase(response.purchase) : null;
+          const normalizedCheckout = response.checkout ? normalizeCheckout(response.checkout) : null;
+          mergeCourse(normalizedCourse);
+          if (normalizedPurchase?.status === "paid") {
+            const profileResponse = await api.profile();
+            setProfile(normalizeProfile(profileResponse.profile));
+            syncTabs("purchase");
+          }
+          return { error: null, course: normalizedCourse, purchase: normalizedPurchase, checkout: normalizedCheckout };
+        } catch (error) {
+          return { error: getErrorMessage(error, "No se pudo verificar el estado del pago."), course: null, purchase: null, checkout: null };
+        }
+      },
+      confirmDemoPayment: async (reference) => {
+        if (!profile) {
+          return { error: "Debes iniciar sesion para confirmar el pago.", course: null, purchase: null, checkout: null };
+        }
+
+        try {
+          const response = await api.confirmDemoPayment(reference);
+          const normalizedProfile = normalizeProfile(response.profile);
+          const normalizedCourse = normalizeCourse(response.course);
+          const normalizedPurchase = response.purchase ? normalizePurchase(response.purchase) : null;
+          const normalizedCheckout = response.checkout ? normalizeCheckout(response.checkout) : null;
+          setProfile(normalizedProfile);
+          mergeCourse(normalizedCourse);
+          syncTabs("purchase");
+          return { error: null, course: normalizedCourse, purchase: normalizedPurchase, checkout: normalizedCheckout };
+        } catch (error) {
+          return { error: getErrorMessage(error, "No se pudo confirmar el pago demo."), course: null, purchase: null, checkout: null };
         }
       },
       createAdminCourse: async (payload) => {

@@ -760,14 +760,21 @@ def build_trophies(user: User) -> list[dict]:
     return trophies
 
 
-def paid_purchase_for_user(user: User | None, course: Course) -> Purchase | None:
+def latest_purchase_for_user(user: User | None, course: Course, *statuses: str) -> Purchase | None:
     if user is None:
         return None
-    return (
-        Purchase.query.filter_by(user_id=user.id, course_id=course.id, status="paid")
-        .order_by(Purchase.created_at.desc())
-        .first()
-    )
+    query = Purchase.query.filter_by(user_id=user.id, course_id=course.id)
+    if statuses:
+        query = query.filter(Purchase.status.in_(statuses))
+    return query.order_by(Purchase.created_at.desc()).first()
+
+
+def paid_purchase_for_user(user: User | None, course: Course) -> Purchase | None:
+    return latest_purchase_for_user(user, course, "paid")
+
+
+def pending_purchase_for_user(user: User | None, course: Course) -> Purchase | None:
+    return latest_purchase_for_user(user, course, "pending")
 
 
 def serialize_course(course: Course, user: User | None = None) -> dict:
@@ -1177,6 +1184,14 @@ def register_routes(app: Flask) -> None:
                 "checkout": serialize_checkout_session(existing_purchase),
             })
 
+        existing_pending = pending_purchase_for_user(user, course)
+        if existing_pending is not None:
+            return jsonify({
+                "course": serialize_course(course, user),
+                "purchase": serialize_purchase(existing_pending),
+                "checkout": serialize_checkout_session(existing_pending),
+            })
+
         data = request.get_json(silent=True) or {}
         provider_label = normalize_provider_label(data.get("provider") or data.get("brand") or "Mercado Pago")
 
@@ -1213,6 +1228,22 @@ def register_routes(app: Flask) -> None:
         if purchase is None:
             return jsonify({"error": "Purchase not found"}), 404
         return jsonify({
+            "purchase": serialize_purchase(purchase),
+            "course": serialize_course(purchase.course, user),
+            "checkout": serialize_checkout_session(purchase),
+        })
+
+    @app.post("/api/payments/<reference>/confirm-demo")
+    @login_required
+    def confirm_demo_payment(user: User, reference: str):
+        purchase = Purchase.query.filter_by(provider_reference=reference, user_id=user.id).first()
+        if purchase is None:
+            return jsonify({"error": "Purchase not found"}), 404
+
+        activate_paid_purchase(purchase)
+        db.session.commit()
+        return jsonify({
+            "profile": serialize_profile(user),
             "purchase": serialize_purchase(purchase),
             "course": serialize_course(purchase.course, user),
             "checkout": serialize_checkout_session(purchase),

@@ -39,6 +39,20 @@ export type PurchaseSummary = {
   paidAt?: string | null;
 };
 
+export type CheckoutSession = {
+  reference: string;
+  provider: string;
+  status: string;
+  currency: string;
+  amount: number;
+  discountAmount: number;
+  sandboxMode: boolean;
+  nextAction: string;
+  statusUrl: string;
+  webhookPath: string;
+  successUrl: string;
+};
+
 export type ReferralRecord = {
   id: number;
   code: string;

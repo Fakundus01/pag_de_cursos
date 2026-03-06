@@ -4,7 +4,7 @@ import { Link, useNavigate, useParams } from "react-router-dom";
 import { PageLoader } from "../components/shared/PageLoader";
 import { api, getErrorMessage } from "../lib/api";
 import { useAppContext } from "../store/AppContext";
-import type { Comment, ContentBlock, CourseDetail } from "../types";
+import type { CheckoutSession, Comment, ContentBlock, Course, CourseDetail } from "../types";
 
 const normalizeContentBlock = (content: any): ContentBlock => ({
   id: Number(content.id),
@@ -91,10 +91,16 @@ const celebrationStars = [
   { left: "88%", top: "25%", size: 19, delay: "0.5s", duration: "2.4s" }
 ];
 
+type CheckoutActionResult = {
+  error: string | null;
+  course: Course | null;
+  checkout: CheckoutSession | null;
+};
+
 export const CoursePlayerPage = () => {
   const { slug } = useParams();
   const navigate = useNavigate();
-  const { profile, authResolved, completeSection, purchaseCourse } = useAppContext();
+  const { profile, authResolved, completeSection, startCheckout, refreshCheckout, confirmDemoPayment } = useAppContext();
   const [course, setCourse] = useState<CourseDetail | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -106,6 +112,9 @@ export const CoursePlayerPage = () => {
   const [purchaseProvider, setPurchaseProvider] = useState("Mercado Pago");
   const [purchaseLast4, setPurchaseLast4] = useState("");
   const [purchasing, setPurchasing] = useState(false);
+  const [checkingCheckout, setCheckingCheckout] = useState(false);
+  const [confirmingCheckout, setConfirmingCheckout] = useState(false);
+  const [checkoutSession, setCheckoutSession] = useState<CheckoutSession | null>(null);
   const [courseCelebration, setCourseCelebration] = useState(false);
   const [selectedSectionId, setSelectedSectionId] = useState<string | null>(null);
   const [finalChallengeOpen, setFinalChallengeOpen] = useState(false);
@@ -195,6 +204,128 @@ export const CoursePlayerPage = () => {
   const sectionVideoReady = currentSection
     ? Boolean(requiredVideoWatched[currentSection.id] || currentSection.completed || completedSections.has(currentSection.id) || !sectionNeedsRequiredVideo)
     : true;
+  const checkoutStorageKey = slug ? `starcraft-course-checkout-${slug}` : null;
+
+  const persistCheckoutReference = (reference: string | null) => {
+    if (!checkoutStorageKey || typeof window === "undefined") {
+      return;
+    }
+    if (reference) {
+      window.localStorage.setItem(checkoutStorageKey, reference);
+      return;
+    }
+    window.localStorage.removeItem(checkoutStorageKey);
+  };
+
+  const syncCourseState = (nextCourse: Course | null) => {
+    if (!nextCourse) {
+      return;
+    }
+    setCourse((current) =>
+      current
+        ? {
+            ...current,
+            ...nextCourse,
+            comments: current.comments,
+            activity: current.activity
+          }
+        : current
+    );
+  };
+
+  const applyCheckoutResult = (result: CheckoutActionResult, options: { silent?: boolean } = {}) => {
+    if (result.error) {
+      if (!options.silent) {
+        setFeedback(result.error);
+      }
+      return false;
+    }
+
+    syncCourseState(result.course);
+    if (result.checkout) {
+      setCheckoutSession(result.checkout);
+      if (result.checkout.status === "pending") {
+        persistCheckoutReference(result.checkout.reference);
+        if (!options.silent) {
+          setFeedback(`Checkout listo. Referencia ${result.checkout.reference}. Confirma el pago demo o espera el webhook.`);
+        }
+      } else {
+        persistCheckoutReference(null);
+        if (!options.silent) {
+          setFeedback("Pago confirmado y curso desbloqueado para tu cuenta.");
+        }
+      }
+    }
+    return true;
+  };
+
+  useEffect(() => {
+    if (!slug || typeof window === "undefined") {
+      return;
+    }
+    if (!showLocked) {
+      persistCheckoutReference(null);
+      setCheckoutSession(null);
+    }
+  }, [showLocked, slug]);
+
+  useEffect(() => {
+    if (!slug || typeof window === "undefined") {
+      return;
+    }
+    if (!profile || !showLocked) {
+      setCheckingCheckout(false);
+      return;
+    }
+
+    const storedReference = window.localStorage.getItem(`starcraft-course-checkout-${slug}`);
+    if (!storedReference) {
+      setCheckingCheckout(false);
+      return;
+    }
+
+    let isActive = true;
+    setCheckingCheckout(true);
+
+    void (async () => {
+      const result = await refreshCheckout(storedReference);
+      if (!isActive) {
+        return;
+      }
+      if (result.error && result.error.toLowerCase().includes("not found")) {
+        persistCheckoutReference(null);
+      }
+      applyCheckoutResult(result, { silent: true });
+      setCheckingCheckout(false);
+    })();
+
+    return () => {
+      isActive = false;
+    };
+  }, [profile?.email, showLocked, slug]);
+
+  useEffect(() => {
+    if (!checkoutSession?.reference || checkoutSession.status !== "pending") {
+      return;
+    }
+
+    let isActive = true;
+    const intervalId = window.setInterval(() => {
+      void (async () => {
+        const result = await refreshCheckout(checkoutSession.reference);
+        if (!isActive) {
+          return;
+        }
+        const shouldAnnounce = Boolean(!result.error && result.checkout && result.checkout.status === "paid");
+        applyCheckoutResult(result, { silent: !shouldAnnounce });
+      })();
+    }, 5000);
+
+    return () => {
+      isActive = false;
+      window.clearInterval(intervalId);
+    };
+  }, [checkoutSession?.reference, checkoutSession?.status]);
 
   if (!authResolved || loading) {
     return <PageLoader fullScreen />;
@@ -604,44 +735,81 @@ export const CoursePlayerPage = () => {
                             placeholder="Ultimos 4 digitos de la tarjeta"
                           />
                         )}
+                        {checkingCheckout && !checkoutSession && (
+                          <p className="rounded-2xl border border-white/10 bg-white/5 px-4 py-3 text-sm text-steel">
+                            Verificando si ya tienes un checkout pendiente...
+                          </p>
+                        )}
+                        {checkoutSession && checkoutSession.status === "pending" && (
+                          <div className="rounded-2xl border border-flare/25 bg-flare/10 p-4 text-sm text-steel">
+                            <p className="text-xs uppercase tracking-[0.22em] text-flare">Checkout activo</p>
+                            <p className="mt-2 text-white">{checkoutSession.provider} - ref {checkoutSession.reference}</p>
+                            <p className="mt-2">
+                              {checkoutSession.currency} {checkoutSession.amount.toFixed(2)}
+                              {checkoutSession.discountAmount > 0 ? ` - descuento ${checkoutSession.currency} ${checkoutSession.discountAmount.toFixed(2)}` : ""}
+                            </p>
+                            <p className="mt-2 text-xs leading-6 text-steel">
+                              Sandbox demo: el front ya usa checkout y consulta de estado. Solo falta conectar el proveedor real con su webhook final.
+                            </p>
+                            <div className="mt-4 flex flex-wrap gap-3">
+                              <button
+                                type="button"
+                                disabled={confirmingCheckout}
+                                className="rounded-full bg-sand px-4 py-2 text-sm font-medium text-abyss disabled:opacity-60"
+                                onClick={async () => {
+                                  setConfirmingCheckout(true);
+                                  const result = await confirmDemoPayment(checkoutSession.reference);
+                                  setConfirmingCheckout(false);
+                                  applyCheckoutResult(result);
+                                }}
+                              >
+                                {confirmingCheckout ? "Confirmando..." : "Confirmar pago demo"}
+                              </button>
+                              <button
+                                type="button"
+                                disabled={checkingCheckout}
+                                className="rounded-full border border-white/10 bg-white/5 px-4 py-2 text-sm text-white disabled:opacity-60"
+                                onClick={async () => {
+                                  setCheckingCheckout(true);
+                                  const result = await refreshCheckout(checkoutSession.reference);
+                                  setCheckingCheckout(false);
+                                  applyCheckoutResult(result);
+                                }}
+                              >
+                                {checkingCheckout ? "Verificando..." : "Verificar estado"}
+                              </button>
+                            </div>
+                          </div>
+                        )}
                         <div className="rounded-2xl border border-aurora/25 bg-aurora/10 p-4 text-sm text-steel">
                           <p>
-                            {course.isUnlocked && !course.isFree ? "Comprado" : `${course.commerce?.currency ?? "USD"} ${course.price}`}
+                            {course.commerce?.currency ?? "USD"} {course.price}
                             {profile.referralSummary?.qualifiedCount ? ` - hasta ${profile.referralSummary.discountPercent}% de descuento por referido activo` : ""}
+                          </p>
+                          <p className="mt-2 text-xs leading-6 text-steel">
+                            Si ya existe un checkout pendiente, retomamos esa referencia para evitar compras duplicadas.
                           </p>
                         </div>
                         <button
                           type="button"
-                          disabled={purchasing}
+                          disabled={purchasing || (purchaseProvider !== "Mercado Pago" && purchaseLast4.length !== 4)}
                           className="w-full rounded-full bg-sand px-5 py-3 text-sm font-medium text-abyss disabled:opacity-60"
                           onClick={async () => {
+                            if (purchaseProvider !== "Mercado Pago" && purchaseLast4.length !== 4) {
+                              setFeedback("Ingresa los ultimos 4 digitos de la tarjeta antes de generar el checkout.");
+                              return;
+                            }
                             setPurchasing(true);
-                            const result = await purchaseCourse(course.slug, {
+                            const result = await startCheckout(course.slug, {
                               provider: purchaseProvider,
                               brand: purchaseProvider,
                               last4: purchaseProvider === "Mercado Pago" ? "0000" : purchaseLast4
                             });
                             setPurchasing(false);
-                            if (result.error) {
-                              setFeedback(result.error);
-                              return;
-                            }
-                            if (result.course) {
-                              setCourse((current) =>
-                                current
-                                  ? {
-                                      ...current,
-                                      ...result.course,
-                                      comments: current.comments,
-                                      activity: current.activity
-                                    }
-                                  : current
-                              );
-                            }
-                            setFeedback("Pago registrado y curso marcado como comprado para tu cuenta.");
+                            applyCheckoutResult(result);
                           }}
                         >
-                          {purchasing ? "Procesando compra..." : "Comprar y desbloquear"}
+                          {purchasing ? "Creando checkout..." : checkoutSession?.status === "pending" ? "Retomar checkout" : "Generar checkout"}
                         </button>
                       </div>
                     )}
