@@ -90,6 +90,7 @@ export type Course = {
   title: string;
   subtitle: string;
   description: string;
+  imageUrl?: string | null;
   level: string;
   isFree: boolean;
   price: number;
@@ -163,6 +164,15 @@ export type SupportChatReply = {
   suggestions: string[];
 };
 
+export type MediaUpload = {
+  kind: string;
+  filename: string;
+  path: string;
+  url: string;
+  contentType?: string | null;
+  size: number;
+};
+
 export type AdminCourseSectionPayload = {
   title: string;
   duration: string;
@@ -179,6 +189,7 @@ export type AdminCoursePayload = {
   slug?: string;
   subtitle: string;
   description: string;
+  imageUrl?: string;
   level: string;
   isFree: boolean;
   price: number;

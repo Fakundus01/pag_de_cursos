@@ -10,6 +10,19 @@ export const CourseCard = ({ course, progress = 0 }: { course: Course; progress?
     <article className="group relative overflow-hidden rounded-[30px] border border-white/10 bg-white/[0.06] p-6 shadow-glow backdrop-blur-xl transition hover:-translate-y-1 hover:border-aurora/35">
       <div className="absolute inset-0 bg-[radial-gradient(circle_at_top_right,rgba(140,198,187,0.18),transparent_35%)] opacity-0 transition group-hover:opacity-100" />
       <div className="relative">
+        <div className="mb-6 overflow-hidden rounded-[26px] border border-white/10 bg-abyss/70">
+          {course.imageUrl ? (
+            <div className="relative h-44">
+              <img src={course.imageUrl} alt={course.title} className="h-full w-full object-cover" />
+              <div className="absolute inset-0 bg-gradient-to-t from-abyss via-abyss/20 to-transparent" />
+            </div>
+          ) : (
+            <div className="flex h-44 items-end bg-[radial-gradient(circle_at_top_right,rgba(140,198,187,0.28),transparent_38%),linear-gradient(135deg,rgba(8,26,36,0.98),rgba(17,56,77,0.92))] px-5 py-4">
+              <span className="rounded-full border border-white/10 bg-white/10 px-3 py-1 text-xs text-aurora">Portada pendiente</span>
+            </div>
+          )}
+        </div>
+
         <div className="flex items-start justify-between gap-4">
           <div>
             <span className="rounded-full border border-white/10 bg-white/5 px-3 py-1 text-xs text-aurora">{course.level}</span>

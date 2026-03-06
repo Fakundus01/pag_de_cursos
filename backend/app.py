@@ -17,9 +17,13 @@ from email.message import EmailMessage
 from functools import wraps
 from threading import Lock
 
-from flask import Flask, jsonify, request, session
+from flask import Flask, jsonify, request, send_from_directory, session
 from flask_cors import CORS
+from werkzeug.exceptions import RequestEntityTooLarge
 from werkzeug.security import check_password_hash, generate_password_hash
+from werkzeug.utils import secure_filename
+
+from sqlalchemy import inspect, text
 
 from models import AuthToken, Comment, Course, CourseSection, EmailStatus, Enrollment, PaymentMethod, Progress, Purchase, Referral, SectionContent, SupportEntry, User, db
 
@@ -44,6 +48,10 @@ RATE_LIMIT_STATE: dict[str, list[float]] = {}
 RATE_LIMIT_LOCK = Lock()
 EMAIL_VERIFY_TOKEN_TYPE = "email_verify"
 PASSWORD_RESET_TOKEN_TYPE = "password_reset"
+MEDIA_KIND_RULES = {
+    "image": {"extensions": {"png", "jpg", "jpeg", "webp", "gif"}, "mime_prefixes": ("image/",)},
+    "video": {"extensions": {"mp4", "webm", "ogg", "mov", "m4v"}, "mime_prefixes": ("video/",)},
+}
 
 
 COURSE_BLUEPRINTS = [
@@ -148,6 +156,91 @@ def backend_public_origin() -> str:
     if explicit:
         return explicit.rstrip("/")
     return "http://127.0.0.1:5000"
+
+
+def media_root() -> str:
+    configured = os.getenv("MEDIA_UPLOAD_ROOT", "").strip()
+    return configured or os.path.join(os.path.dirname(__file__), "instance", "uploads")
+
+
+def max_upload_size_bytes() -> int:
+    return max(1, env_int("MEDIA_UPLOAD_MAX_MB", 200)) * 1024 * 1024
+
+
+def ensure_media_storage() -> None:
+    os.makedirs(media_root(), exist_ok=True)
+
+
+def media_public_url(relative_path: str) -> str:
+    normalized_path = relative_path.replace("\\", "/").lstrip("/")
+    return f"{backend_public_origin()}/media/{urllib.parse.quote(normalized_path, safe='/')}"
+
+
+def sanitize_media_folder(folder: str) -> str:
+    segments = []
+    for raw_segment in str(folder or "").replace("\\", "/").split("/"):
+        segment = secure_filename(raw_segment)
+        if segment:
+            segments.append(segment)
+    return "/".join(segments)
+
+
+def validate_upload_kind(kind: str) -> str:
+    normalized = str(kind or "").strip().lower()
+    if normalized not in MEDIA_KIND_RULES:
+        raise ValueError("Upload kind must be image or video.")
+    return normalized
+
+
+def validate_uploaded_file(file_storage, kind: str) -> tuple[str, str]:
+    filename = secure_filename(file_storage.filename or "")
+    if not filename:
+        raise ValueError("Select a file to upload.")
+
+    extension = os.path.splitext(filename)[1].lower().lstrip(".")
+    allowed_extensions = MEDIA_KIND_RULES[kind]["extensions"]
+    if extension not in allowed_extensions:
+        raise ValueError(f"Unsupported {kind} format. Allowed: {', '.join(sorted(allowed_extensions))}.")
+
+    mimetype = (file_storage.mimetype or "").lower()
+    mime_prefixes = MEDIA_KIND_RULES[kind]["mime_prefixes"]
+    if mimetype and mimetype != "application/octet-stream" and not any(mimetype.startswith(prefix) for prefix in mime_prefixes):
+        raise ValueError(f"Uploaded file does not look like a valid {kind}.")
+
+    return filename, extension
+
+
+def save_admin_media(file_storage, kind: str, folder: str = "") -> dict:
+    normalized_kind = validate_upload_kind(kind)
+    safe_name, extension = validate_uploaded_file(file_storage, normalized_kind)
+    safe_folder = sanitize_media_folder(folder)
+
+    stem = os.path.splitext(safe_name)[0][:80] or normalized_kind
+    filename = f"{stem}-{secrets.token_hex(8)}.{extension}"
+    relative_directory = os.path.join(normalized_kind, safe_folder) if safe_folder else normalized_kind
+    target_directory = os.path.join(media_root(), relative_directory)
+    os.makedirs(target_directory, exist_ok=True)
+
+    absolute_path = os.path.join(target_directory, filename)
+    file_storage.save(absolute_path)
+
+    relative_path = os.path.relpath(absolute_path, media_root()).replace("\\", "/")
+    return {
+        "kind": normalized_kind,
+        "filename": filename,
+        "path": relative_path,
+        "url": media_public_url(relative_path),
+        "contentType": file_storage.mimetype or None,
+        "size": os.path.getsize(absolute_path),
+    }
+
+
+def ensure_schema_updates() -> None:
+    inspector = inspect(db.engine)
+    course_columns = {column["name"] for column in inspector.get_columns("course")}
+    if "image_url" not in course_columns:
+        db.session.execute(text("ALTER TABLE course ADD COLUMN image_url VARCHAR(500)"))
+        db.session.commit()
 
 
 def payment_currency() -> str:
@@ -656,6 +749,7 @@ def create_app() -> Flask:
     app.config["SESSION_COOKIE_SECURE"] = env_bool("SESSION_COOKIE_SECURE", False)
     app.config["SESSION_COOKIE_PATH"] = "/"
     app.config["PERMANENT_SESSION_LIFETIME"] = timedelta(days=env_int("SESSION_LIFETIME_DAYS", 7))
+    app.config["MAX_CONTENT_LENGTH"] = max_upload_size_bytes()
     app.config["SESSION_REFRESH_EACH_REQUEST"] = True
 
     cookie_domain = os.getenv("SESSION_COOKIE_DOMAIN", "").strip()
@@ -688,8 +782,16 @@ def create_app() -> Flask:
             response.headers.setdefault("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
         return response
 
+    @app.errorhandler(RequestEntityTooLarge)
+    def handle_request_too_large(error):
+        del error
+        max_mb = max_upload_size_bytes() // (1024 * 1024)
+        return jsonify({"error": f"File exceeds the {max_mb} MB upload limit."}), 413
+
     with app.app_context():
         db.create_all()
+        ensure_schema_updates()
+        ensure_media_storage()
         seed_data()
 
     register_routes(app)
@@ -704,6 +806,7 @@ def seed_data() -> None:
                 title=blueprint["title"],
                 subtitle=blueprint["subtitle"],
                 description=blueprint["description"],
+                image_url=blueprint.get("image_url"),
                 level=blueprint["level"],
                 is_free=blueprint["is_free"],
                 price=blueprint["price"],
@@ -974,6 +1077,7 @@ def create_course_from_admin_payload(data: dict) -> Course:
         title=title,
         subtitle=str(data.get("subtitle", "Curso premium")).strip() or "Curso premium",
         description=description,
+        image_url=str(data.get("imageUrl", "")).strip() or None,
         level=str(data.get("level", "Intermedio")).strip() or "Intermedio",
         is_free=bool(data.get("isFree", False)),
         price=0 if bool(data.get("isFree", False)) else max(0, int(data.get("price", 0) or 0)),
@@ -1156,6 +1260,7 @@ def serialize_course(course: Course, user: User | None = None) -> dict:
         "title": course.title,
         "subtitle": course.subtitle,
         "description": course.description,
+        "imageUrl": course.image_url,
         "level": course.level,
         "isFree": course.is_free,
         "price": course.price,
@@ -2295,6 +2400,31 @@ def register_routes(app: Flask) -> None:
         update_enrollment_progress(enrollment)
         db.session.commit()
         return jsonify({"profile": serialize_profile(user)})
+
+    @app.get("/media/<path:relative_path>")
+    def media_file(relative_path: str):
+        normalized_path = relative_path.strip().replace("\\", "/").lstrip("/")
+        if not normalized_path:
+            return jsonify({"error": "Media file not found"}), 404
+        return send_from_directory(media_root(), normalized_path)
+
+    @app.post("/api/admin/uploads")
+    @admin_required
+    @rate_limit("admin-upload-media", limit_env="RATE_LIMIT_ADMIN_WRITE", limit_default=30, window_env="RATE_LIMIT_ADMIN_WRITE_WINDOW", window_default=600, scope="user_or_ip")
+    def admin_upload_media(user: User):
+        del user
+        upload = request.files.get("file")
+        if upload is None:
+            return jsonify({"error": "File is required."}), 400
+
+        kind = str(request.form.get("kind", "")).strip()
+        folder = str(request.form.get("folder", "")).strip()
+        try:
+            payload = save_admin_media(upload, kind, folder)
+        except ValueError as exc:
+            return jsonify({"error": str(exc)}), 400
+
+        return jsonify(payload), 201
 
     @app.post("/api/admin/courses")
     @admin_required

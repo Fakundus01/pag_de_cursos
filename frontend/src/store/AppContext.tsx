@@ -141,6 +141,7 @@ const normalizeCourse = (course: any): Course => ({
   title: course.title,
   subtitle: course.subtitle,
   description: course.description,
+  imageUrl: course.imageUrl ?? null,
   level: course.level,
   isFree: Boolean(course.isFree),
   price: Number(course.price ?? 0),

@@ -24,6 +24,7 @@ const normalizeCourseDetail = (course: any): CourseDetail => ({
   title: course.title,
   subtitle: course.subtitle,
   description: course.description,
+  imageUrl: course.imageUrl ?? null,
   level: course.level,
   isFree: Boolean(course.isFree),
   price: Number(course.price ?? 0),
@@ -100,6 +101,73 @@ type CheckoutActionResult = {
 type StoredCheckoutSnapshot = {
   reference: string;
   redirectUrl?: string | null;
+};
+
+type VideoPresentation =
+  | { kind: "file"; src: string }
+  | { kind: "iframe"; src: string; provider: string }
+  | { kind: "external"; src: string };
+
+const directVideoPattern = /\.(mp4|webm|ogg)(\?.*)?$/i;
+
+const getVideoPresentation = (assetUrl?: string | null): VideoPresentation | null => {
+  const source = assetUrl?.trim();
+  if (!source) {
+    return null;
+  }
+
+  if (directVideoPattern.test(source)) {
+    return { kind: "file", src: source };
+  }
+
+  try {
+    const parsedUrl = new URL(source);
+    const hostname = parsedUrl.hostname.replace(/^www\./i, "").toLowerCase();
+    const pathSegments = parsedUrl.pathname.split("/").filter(Boolean);
+
+    if (hostname === "youtu.be") {
+      const videoId = pathSegments[0];
+      if (videoId) {
+        return { kind: "iframe", src: `https://www.youtube-nocookie.com/embed/${videoId}`, provider: "YouTube" };
+      }
+    }
+
+    if (["youtube.com", "m.youtube.com", "youtube-nocookie.com"].includes(hostname)) {
+      const primarySegment = pathSegments[0];
+      const videoId =
+        parsedUrl.searchParams.get("v") ??
+        (primarySegment === "embed" || primarySegment === "shorts" || primarySegment === "live" ? pathSegments[1] : undefined);
+      if (videoId) {
+        return { kind: "iframe", src: `https://www.youtube-nocookie.com/embed/${videoId}`, provider: "YouTube" };
+      }
+    }
+
+    if (hostname === "vimeo.com" || hostname === "player.vimeo.com") {
+      const videoId = pathSegments.find((segment) => /^\d+$/.test(segment));
+      if (videoId) {
+        return { kind: "iframe", src: `https://player.vimeo.com/video/${videoId}`, provider: "Vimeo" };
+      }
+    }
+
+    if (hostname === "loom.com") {
+      const loomId = pathSegments[1] ?? pathSegments[0];
+      if (loomId) {
+        return { kind: "iframe", src: `https://www.loom.com/embed/${loomId}`, provider: "Loom" };
+      }
+    }
+
+    if (hostname === "drive.google.com") {
+      const fileIndex = pathSegments.indexOf("d");
+      const driveId = fileIndex >= 0 ? pathSegments[fileIndex + 1] : undefined;
+      if (driveId) {
+        return { kind: "iframe", src: `https://drive.google.com/file/d/${driveId}/preview`, provider: "Google Drive" };
+      }
+    }
+  } catch {
+    return { kind: "external", src: source };
+  }
+
+  return { kind: "external", src: source };
 };
 
 export const CoursePlayerPage = () => {
@@ -525,7 +593,8 @@ export const CoursePlayerPage = () => {
                     const isVideo = content.type === "video";
                     const videoRequired = Boolean(content.metadata?.videoRequired ?? isVideo);
                     const videoSummary = String(content.metadata?.summary ?? content.body);
-                    const canEmbedVideo = Boolean(content.assetUrl && /\.(mp4|webm|ogg)(\?.*)?$/i.test(content.assetUrl));
+                    const videoPresentation = isVideo ? getVideoPresentation(content.assetUrl) : null;
+                    const videoAlreadyWatched = Boolean(requiredVideoWatched[currentSection.id] || currentSection.completed || completedSections.has(currentSection.id));
                     return (
                       <article key={content.id} className="rounded-[28px] border border-white/10 bg-white/5 p-5">
                         <div className="flex flex-wrap items-center justify-between gap-3">
@@ -542,17 +611,36 @@ export const CoursePlayerPage = () => {
 
                         {isVideo ? (
                           <div className="mt-4 space-y-4">
-                            {canEmbedVideo ? (
-                              <video
-                                controls
-                                className="w-full rounded-[22px] border border-white/10 bg-black/40"
-                                src={content.assetUrl ?? undefined}
-                                onEnded={() => setRequiredVideoWatched((current) => ({ ...current, [currentSection.id]: true }))}
-                              />
+                            {videoPresentation?.kind === "file" ? (
+                              <div className="space-y-3">
+                                <video
+                                  controls
+                                  className="w-full rounded-[22px] border border-white/10 bg-black/40"
+                                  src={videoPresentation.src}
+                                  onEnded={() => setRequiredVideoWatched((current) => ({ ...current, [currentSection.id]: true }))}
+                                />
+                                {videoRequired && !videoAlreadyWatched && (
+                                  <p className="text-xs leading-6 text-steel">Al terminar este video, la seccion queda lista para cerrarse automaticamente.</p>
+                                )}
+                              </div>
+                            ) : videoPresentation?.kind === "iframe" ? (
+                              <div className="rounded-[22px] border border-white/10 bg-black/40 p-2">
+                                <div className="relative overflow-hidden rounded-[18px]" style={{ paddingTop: "56.25%" }}>
+                                  <iframe
+                                    className="absolute inset-0 h-full w-full border-0"
+                                    src={videoPresentation.src}
+                                    title={`${content.title} - ${videoPresentation.provider}`}
+                                    allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
+                                    allowFullScreen
+                                    referrerPolicy="strict-origin-when-cross-origin"
+                                  />
+                                </div>
+                                <p className="mt-3 text-xs leading-6 text-steel">Reproduccion embebida desde {videoPresentation.provider}. Cuando termines de verlo, confirma manualmente el avance para habilitar el cierre de la seccion.</p>
+                              </div>
                             ) : (
                               <div className="rounded-[22px] border border-white/10 bg-abyss/60 p-5">
                                 <p className="text-sm text-white">Video cargado por el admin</p>
-                                <p className="mt-2 text-sm leading-7 text-steel">Si el admin agrega un mp4 se reproduce aqui. Mientras tanto puedes abrir el recurso manualmente y confirmar que lo viste.</p>
+                                <p className="mt-2 text-sm leading-7 text-steel">Si la URL no es embebible, dejamos el acceso directo para abrir el recurso afuera sin bloquear el flujo del curso.</p>
                                 {content.assetUrl && (
                                   <a href={content.assetUrl} target="_blank" rel="noreferrer" className="mt-4 inline-flex rounded-full bg-sand px-4 py-2 text-sm font-medium text-abyss">
                                     Abrir video
@@ -564,7 +652,7 @@ export const CoursePlayerPage = () => {
                               <p className="text-xs uppercase tracking-[0.22em] text-aurora">Resumen accesible</p>
                               <p className="mt-3 text-sm leading-7 text-steel">{videoSummary}</p>
                             </div>
-                            {videoRequired && !(requiredVideoWatched[currentSection.id] || currentSection.completed || completedSections.has(currentSection.id)) && (
+                            {videoRequired && !videoAlreadyWatched && (
                               <button
                                 type="button"
                                 onClick={() => setRequiredVideoWatched((current) => ({ ...current, [currentSection.id]: true }))}

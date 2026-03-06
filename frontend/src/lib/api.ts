@@ -1,4 +1,4 @@
-import type { AdminCoursePayload, CheckoutSession, EmailDelivery, SupportChatReply, SupportContent } from "../types";
+import type { AdminCoursePayload, CheckoutSession, EmailDelivery, MediaUpload, SupportChatReply, SupportContent } from "../types";
 
 const defaultApiOrigin = typeof window !== "undefined" ? `${window.location.protocol}//${window.location.hostname}:5000` : "http://127.0.0.1:5000";
 const API_URL = import.meta.env.VITE_API_URL ?? `${defaultApiOrigin}/api`;
@@ -83,7 +83,8 @@ type RequestOptions = {
 async function request<T>(path: string, init?: RequestInit, options: RequestOptions = {}): Promise<T> {
   const method = (init?.method ?? "GET").toUpperCase();
   const headers = new Headers(init?.headers ?? undefined);
-  if (init?.body && !headers.has("Content-Type")) {
+  const isFormDataBody = typeof FormData !== "undefined" && init?.body instanceof FormData;
+  if (init?.body && !isFormDataBody && !headers.has("Content-Type")) {
     headers.set("Content-Type", "application/json");
   }
 
@@ -165,6 +166,7 @@ export const api = {
   paymentStatus: (reference: string) => request<{ course: any; purchase: any; checkout: CheckoutSession }>(`/payments/${reference}`),
   confirmDemoPayment: (reference: string) =>
     request<{ profile: any; course: any; purchase: any; checkout: CheckoutSession }>(`/payments/${reference}/confirm-demo`, { method: "POST" }),
+  adminUploadMedia: (payload: FormData) => request<MediaUpload>("/admin/uploads", { method: "POST", body: payload }),
   adminCreateCourse: (payload: AdminCoursePayload) => request<{ course: any }>("/admin/courses", { method: "POST", body: JSON.stringify(payload) }),
   adminSaveSupport: (payload: SupportContent) => request<SupportContent>("/admin/support", { method: "PUT", body: JSON.stringify(payload) })
 };

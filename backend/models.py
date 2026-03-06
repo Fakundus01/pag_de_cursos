@@ -56,6 +56,7 @@ class Course(db.Model):
     title = db.Column(db.String(160), nullable=False)
     subtitle = db.Column(db.String(160), nullable=False)
     description = db.Column(db.Text, nullable=False)
+    image_url = db.Column(db.String(500), nullable=True)
     level = db.Column(db.String(40), nullable=False)
     is_free = db.Column(db.Boolean, default=False)
     price = db.Column(db.Integer, default=0)
