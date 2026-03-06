@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import os
 import re
-from datetime import datetime
+from datetime import datetime, timedelta
 from decimal import Decimal
 from functools import wraps
 
@@ -76,6 +76,23 @@ COURSE_BLUEPRINTS = [
 ]
 
 
+def env_bool(key: str, default: bool = False) -> bool:
+    value = os.getenv(key)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def env_int(key: str, default: int) -> int:
+    value = os.getenv(key)
+    if value is None:
+        return default
+    try:
+        return int(value)
+    except ValueError:
+        return default
+
+
 def resolve_database_url() -> str:
     database_url = os.getenv("DATABASE_URL", "").strip()
     if not database_url:
@@ -110,6 +127,20 @@ def amount_to_float(value: Decimal | int | float | None) -> float:
 
 def isoformat_or_none(value: datetime | None) -> str | None:
     return value.isoformat() if value is not None else None
+
+
+def normalize_provider_label(value: object) -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        return "Mercado Pago"
+    lowered = raw.lower().replace("_", " ").replace("-", " ")
+    if "mercado" in lowered:
+        return "Mercado Pago"
+    if "master" in lowered:
+        return "Mastercard"
+    if "visa" in lowered:
+        return "Visa"
+    return raw[:40]
 
 
 def build_unique_referral_code(seed: str) -> str:
@@ -207,7 +238,7 @@ def ensure_purchase(
     discount_amount: Decimal,
     total_amount: Decimal,
     status: str = "paid",
-    provider: str = "mercado_pago",
+    provider: str = "Mercado Pago",
     referral: Referral | None = None,
 ) -> Purchase:
     purchase = Purchase.query.filter_by(provider_reference=provider_reference).first()
@@ -219,7 +250,7 @@ def ensure_purchase(
         course_id=course.id,
         payment_method_id=payment_method.id if payment_method else None,
         referral_id=referral.id if referral else None,
-        provider=provider,
+        provider=normalize_provider_label(provider),
         provider_reference=provider_reference,
         status=status,
         currency="USD",
@@ -295,9 +326,17 @@ def create_app() -> Flask:
     app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
     app.config["SQLALCHEMY_ENGINE_OPTIONS"] = {"pool_pre_ping": True} if database_url.startswith("postgresql") else {}
     app.config["SECRET_KEY"] = os.getenv("SECRET_KEY", "dev-secret-change-me")
+    app.config["SESSION_COOKIE_NAME"] = os.getenv("SESSION_COOKIE_NAME", "starcraft_academy_session")
     app.config["SESSION_COOKIE_HTTPONLY"] = True
-    app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
-    app.config["SESSION_COOKIE_SECURE"] = os.getenv("SESSION_COOKIE_SECURE", "false").lower() == "true"
+    app.config["SESSION_COOKIE_SAMESITE"] = os.getenv("SESSION_COOKIE_SAMESITE", "Lax") or "Lax"
+    app.config["SESSION_COOKIE_SECURE"] = env_bool("SESSION_COOKIE_SECURE", False)
+    app.config["SESSION_COOKIE_PATH"] = "/"
+    app.config["PERMANENT_SESSION_LIFETIME"] = timedelta(days=env_int("SESSION_LIFETIME_DAYS", 7))
+    app.config["SESSION_REFRESH_EACH_REQUEST"] = True
+
+    cookie_domain = os.getenv("SESSION_COOKIE_DOMAIN", "").strip()
+    if cookie_domain:
+        app.config["SESSION_COOKIE_DOMAIN"] = cookie_domain
 
     db.init_app(app)
     CORS(app, supports_credentials=True, origins=parse_frontend_origins())
@@ -439,7 +478,7 @@ def serialize_purchase(purchase: Purchase) -> dict:
         "id": purchase.id,
         "courseId": purchase.course.slug,
         "courseTitle": purchase.course.title,
-        "provider": purchase.provider,
+        "provider": normalize_provider_label(purchase.provider),
         "providerReference": purchase.provider_reference,
         "status": purchase.status,
         "currency": purchase.currency,
@@ -680,6 +719,32 @@ def parse_star_rating(raw_value: object) -> int:
         return 5
 
 
+def build_checkout_payment_method(user: User, provider_label: str, raw_last4: object) -> PaymentMethod | None:
+    if provider_label == "Mercado Pago":
+        return None
+
+    digits = re.sub(r"\D", "", str(raw_last4 or ""))[-4:]
+    if len(digits) != 4:
+        raise ValueError("Card last4 must have 4 digits")
+    return ensure_payment_method(user, provider_label, digits)
+
+
+def build_purchase_amounts(course: Course, user: User) -> tuple[Decimal, Decimal, Decimal, Referral | None]:
+    subtotal = Decimal(str(course.price)).quantize(Decimal("0.01"))
+    discount = Decimal("0.00")
+    referral = user.referral_attribution
+
+    if referral is not None and referral.status == "qualified":
+        discount = (subtotal * Decimal(referral.reward_percent) / Decimal("100")).quantize(Decimal("0.01"))
+        referral.status = "rewarded"
+        referral.converted_at = datetime.utcnow()
+    else:
+        referral = None
+
+    total = (subtotal - discount).quantize(Decimal("0.01"))
+    return subtotal, discount, total, referral
+
+
 def register_routes(app: Flask) -> None:
     @app.get("/api/health")
     def health():
@@ -764,6 +829,8 @@ def register_routes(app: Flask) -> None:
             db.session.add(Enrollment(user_id=user.id, course_id=free_course.id, purchased=True))
 
         db.session.commit()
+        session.clear()
+        session.permanent = True
         session["user_id"] = user.id
         return jsonify({"profile": serialize_profile(user)}), 201
 
@@ -776,6 +843,8 @@ def register_routes(app: Flask) -> None:
         if not user or not check_password_hash(user.password_hash, password):
             return jsonify({"error": "Invalid credentials"}), 401
 
+        session.clear()
+        session.permanent = True
         session["user_id"] = user.id
         return jsonify({"profile": serialize_profile(user)})
 
@@ -804,6 +873,56 @@ def register_routes(app: Flask) -> None:
         user.avatar = data.get("avatar", user.avatar).strip()[:8] or user.avatar
         db.session.commit()
         return jsonify({"profile": serialize_profile(user)})
+
+    @app.post("/api/courses/<slug>/purchase")
+    @login_required
+    def purchase_course(user: User, slug: str):
+        course = Course.query.filter_by(slug=slug).first_or_404()
+        if course.is_free:
+            enrollment = get_or_create_enrollment(user, course)
+            if enrollment is not None:
+                db.session.commit()
+            return jsonify({"profile": serialize_profile(user), "course": serialize_course(course, user), "purchase": None})
+
+        existing_purchase = paid_purchase_for_user(user, course)
+        if existing_purchase is not None:
+            enrollment = get_or_create_enrollment(user, course)
+            if enrollment is not None and not enrollment.purchased:
+                enrollment.purchased = True
+                db.session.commit()
+            return jsonify({"profile": serialize_profile(user), "course": serialize_course(course, user), "purchase": serialize_purchase(existing_purchase)})
+
+        data = request.get_json(silent=True) or {}
+        provider_label = normalize_provider_label(data.get("provider") or data.get("brand") or "Mercado Pago")
+
+        try:
+            payment_method = build_checkout_payment_method(user, provider_label, data.get("last4"))
+        except ValueError as exc:
+            return jsonify({"error": str(exc)}), 400
+
+        subtotal, discount, total, referral = build_purchase_amounts(course, user)
+        purchase = ensure_purchase(
+            user,
+            course,
+            provider_reference=f"checkout-{course.slug}-{user.id}-{int(datetime.utcnow().timestamp())}",
+            payment_method=payment_method,
+            subtotal_amount=subtotal,
+            discount_amount=discount,
+            total_amount=total,
+            provider=provider_label,
+            referral=referral,
+        )
+
+        previous_enrollment = Enrollment.query.filter_by(user_id=user.id, course_id=course.id).first()
+        enrollment = get_or_create_enrollment(user, course)
+        if enrollment is not None:
+            enrollment.purchased = True
+
+        if previous_enrollment is None:
+            course.students += 1
+
+        db.session.commit()
+        return jsonify({"profile": serialize_profile(user), "course": serialize_course(course, user), "purchase": serialize_purchase(purchase)}), 201
 
     @app.post("/api/courses/<slug>/progress")
     @login_required

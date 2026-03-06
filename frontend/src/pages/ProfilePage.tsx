@@ -1,4 +1,4 @@
-import { Award, CreditCard, Percent, Trophy, UserRoundCheck } from "lucide-react";
+import { Award, CreditCard, Percent, ReceiptText, Trophy, UserRoundCheck, UsersRound } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { useAppContext } from "../store/AppContext";
 
@@ -79,7 +79,7 @@ export const ProfilePage = () => {
           <div className="rounded-[30px] border border-white/10 bg-white/5 p-6">
             <Percent className="text-sand" />
             <p className="mt-5 text-sm text-steel">Descuento por referidos</p>
-            <p className="mt-2 text-3xl font-semibold text-sand">10%</p>
+            <p className="mt-2 text-3xl font-semibold text-sand">{profile.referralSummary?.discountPercent ?? 10}%</p>
           </div>
         </div>
       </section>
@@ -115,6 +115,7 @@ export const ProfilePage = () => {
                 {card}
               </div>
             ))}
+            {!profile.savedCards.length && <p className="text-sm text-steel">Todavia no guardaste metodos de pago.</p>}
           </div>
           <p className="mt-5 text-sm text-steel">Link de referido: academy.gg/invite/{profile.referralCode}</p>
         </div>
@@ -160,6 +161,57 @@ export const ProfilePage = () => {
               </div>
             ))}
             {!profile.trophies.length && <p className="text-sm text-steel">Aun no desbloqueaste trofeos.</p>}
+          </div>
+        </div>
+      </section>
+
+      <section className="grid gap-6 lg:grid-cols-2">
+        <div className="rounded-[30px] border border-white/10 bg-white/5 p-6">
+          <div className="flex items-center gap-3">
+            <ReceiptText className="text-aurora" />
+            <h2 className="text-xl font-semibold text-sand">Historial de compras</h2>
+          </div>
+          <div className="mt-5 space-y-3">
+            {profile.purchaseHistory?.map((purchase) => (
+              <div key={purchase.id} className="rounded-2xl bg-abyss/60 px-4 py-3">
+                <p className="text-white">{purchase.courseTitle}</p>
+                <p className="mt-1 text-xs text-steel">
+                  {purchase.provider} · {purchase.currency} {purchase.totalAmount.toFixed(2)}
+                  {purchase.discountAmount > 0 ? ` · descuento ${purchase.discountAmount.toFixed(2)}` : ""}
+                </p>
+              </div>
+            ))}
+            {!profile.purchaseHistory?.length && <p className="text-sm text-steel">Todavia no registraste compras premium.</p>}
+          </div>
+        </div>
+
+        <div className="rounded-[30px] border border-white/10 bg-white/5 p-6">
+          <div className="flex items-center gap-3">
+            <UsersRound className="text-flare" />
+            <h2 className="text-xl font-semibold text-sand">Referidos</h2>
+          </div>
+          <div className="mt-5 grid gap-4 md:grid-cols-3">
+            <div className="rounded-2xl bg-abyss/60 px-4 py-4">
+              <p className="text-xs text-steel">Enviados</p>
+              <p className="mt-2 text-2xl font-semibold text-sand">{profile.referralSummary?.sentCount ?? 0}</p>
+            </div>
+            <div className="rounded-2xl bg-abyss/60 px-4 py-4">
+              <p className="text-xs text-steel">Calificados</p>
+              <p className="mt-2 text-2xl font-semibold text-sand">{profile.referralSummary?.qualifiedCount ?? 0}</p>
+            </div>
+            <div className="rounded-2xl bg-abyss/60 px-4 py-4">
+              <p className="text-xs text-steel">Recompensados</p>
+              <p className="mt-2 text-2xl font-semibold text-sand">{profile.referralSummary?.rewardedCount ?? 0}</p>
+            </div>
+          </div>
+          <div className="mt-5 space-y-3">
+            {profile.referralSummary?.recent.map((referral) => (
+              <div key={referral.id} className="rounded-2xl bg-abyss/60 px-4 py-3">
+                <p>{referral.referredUser}</p>
+                <p className="text-xs text-steel">{referral.status} · {referral.rewardPercent}%</p>
+              </div>
+            ))}
+            {!profile.referralSummary?.recent.length && <p className="text-sm text-steel">Aun no hay referidos registrados.</p>}
           </div>
         </div>
       </section>

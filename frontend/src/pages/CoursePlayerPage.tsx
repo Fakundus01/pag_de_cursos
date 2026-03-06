@@ -1,10 +1,22 @@
-import { CheckCircle2, ChevronLeft, LockKeyhole, Sparkles, Star } from "lucide-react";
+import { CheckCircle2, ChevronLeft, LockKeyhole, ShieldCheck, Sparkles, Star } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import { PageLoader } from "../components/shared/PageLoader";
 import { api, getErrorMessage } from "../lib/api";
 import { useAppContext } from "../store/AppContext";
-import type { Comment, CourseDetail } from "../types";
+import type { Comment, ContentBlock, CourseDetail } from "../types";
+
+const normalizeContentBlock = (content: any): ContentBlock => ({
+  id: Number(content.id),
+  title: content.title,
+  type: content.type,
+  status: content.status,
+  body: content.body,
+  assetUrl: content.assetUrl ?? null,
+  isPreview: Boolean(content.isPreview),
+  estimatedMinutes: Number(content.estimatedMinutes ?? 0),
+  metadata: typeof content.metadata === "object" && content.metadata !== null ? content.metadata : {}
+});
 
 const normalizeCourseDetail = (course: any): CourseDetail => ({
   id: String(course.id ?? course.slug),
@@ -25,9 +37,32 @@ const normalizeCourseDetail = (course: any): CourseDetail => ({
         id: String(section.id),
         title: section.title,
         duration: section.duration,
-        completed: Boolean(section.completed)
+        completed: Boolean(section.completed),
+        contentBlocks: Array.isArray(section.contentBlocks) ? section.contentBlocks.map(normalizeContentBlock) : []
       }))
     : [],
+  commerce: course.commerce
+    ? {
+        currency: course.commerce.currency ?? "USD",
+        providers: Array.isArray(course.commerce.providers) ? course.commerce.providers.map(String) : [],
+        latestPurchase: course.commerce.latestPurchase
+          ? {
+              id: Number(course.commerce.latestPurchase.id),
+              courseId: String(course.commerce.latestPurchase.courseId),
+              courseTitle: course.commerce.latestPurchase.courseTitle,
+              provider: course.commerce.latestPurchase.provider,
+              providerReference: course.commerce.latestPurchase.providerReference ?? null,
+              status: course.commerce.latestPurchase.status,
+              currency: course.commerce.latestPurchase.currency,
+              subtotalAmount: Number(course.commerce.latestPurchase.subtotalAmount ?? 0),
+              discountAmount: Number(course.commerce.latestPurchase.discountAmount ?? 0),
+              totalAmount: Number(course.commerce.latestPurchase.totalAmount ?? 0),
+              createdAt: course.commerce.latestPurchase.createdAt ?? null,
+              paidAt: course.commerce.latestPurchase.paidAt ?? null
+            }
+          : null
+      }
+    : undefined,
   comments: Array.isArray(course.comments)
     ? course.comments.map(
         (comment: any): Comment => ({
@@ -48,7 +83,7 @@ const normalizeCourseDetail = (course: any): CourseDetail => ({
 
 export const CoursePlayerPage = () => {
   const { slug } = useParams();
-  const { profile, completeSection } = useAppContext();
+  const { profile, authResolved, completeSection, purchaseCourse } = useAppContext();
   const [course, setCourse] = useState<CourseDetail | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -57,6 +92,9 @@ export const CoursePlayerPage = () => {
   const [commentBody, setCommentBody] = useState("");
   const [commentStars, setCommentStars] = useState(5);
   const [submittingComment, setSubmittingComment] = useState(false);
+  const [purchaseProvider, setPurchaseProvider] = useState("Mercado Pago");
+  const [purchaseLast4, setPurchaseLast4] = useState("");
+  const [purchasing, setPurchasing] = useState(false);
 
   useEffect(() => {
     if (!slug) {
@@ -65,11 +103,16 @@ export const CoursePlayerPage = () => {
       return;
     }
 
-    let isActive = true;
-    setLoading(true);
-    setError(null);
+    if (!authResolved) {
+      setLoading(true);
+      return;
+    }
 
-    void (async () => {
+    let isActive = true;
+
+    const loadCourse = async () => {
+      setLoading(true);
+      setError(null);
       try {
         const response = await api.course(slug);
         if (isActive) {
@@ -84,18 +127,33 @@ export const CoursePlayerPage = () => {
           setLoading(false);
         }
       }
-    })();
+    };
+
+    void loadCourse();
+
+    const refreshCurrentCourse = () => {
+      if (document.visibilityState === "hidden") {
+        return;
+      }
+      void loadCourse();
+    };
+
+    window.addEventListener("focus", refreshCurrentCourse);
+    document.addEventListener("visibilitychange", refreshCurrentCourse);
 
     return () => {
       isActive = false;
+      window.removeEventListener("focus", refreshCurrentCourse);
+      document.removeEventListener("visibilitychange", refreshCurrentCourse);
     };
-  }, [slug]);
+  }, [authResolved, slug, profile?.email]);
 
   const completedSections = useMemo(() => new Set(profile?.progressByCourse[course?.id ?? ""] ?? []), [course?.id, profile?.progressByCourse]);
+  const showLocked = course ? course.locked && !course.isUnlocked : false;
   const canAccessPremium = course ? course.isFree || Boolean(course.isUnlocked) : false;
-  const canComment = Boolean(profile) && canAccessPremium;
+  const canComment = authResolved && Boolean(profile) && canAccessPremium;
 
-  if (loading) {
+  if (!authResolved || loading) {
     return <PageLoader fullScreen />;
   }
 
@@ -121,7 +179,7 @@ export const CoursePlayerPage = () => {
               <p className="text-sm uppercase tracking-[0.35em] text-aurora">{course.level}</p>
               <h1 className="mt-4 text-4xl font-semibold text-sand">{course.title}</h1>
             </div>
-            {course.locked && !course.isUnlocked ? (
+            {showLocked ? (
               <span className="inline-flex items-center gap-2 rounded-full border border-flare/40 bg-flare/10 px-4 py-2 text-sm text-flare">
                 <LockKeyhole size={16} />
                 Contenido premium bloqueado
@@ -178,8 +236,32 @@ export const CoursePlayerPage = () => {
                         {isCompleted ? "Completada" : savingSectionId === section.id ? "Guardando..." : "Marcar como hecha"}
                       </button>
                     </div>
-                    <div className="mt-4 rounded-2xl bg-white/5 p-4 text-sm leading-7 text-steel">
-                      {course.activity.prompt}
+
+                    <div className="mt-4 grid gap-3">
+                      {(section.contentBlocks ?? []).map((content) => {
+                        const isVisible = canAccessPremium || content.isPreview;
+                        return (
+                          <div key={content.id} className="rounded-2xl border border-white/10 bg-white/5 p-4 text-sm">
+                            <div className="flex items-center justify-between gap-3">
+                              <div>
+                                <p className="font-medium text-white">{content.title}</p>
+                                <p className="mt-1 text-xs uppercase tracking-[0.18em] text-aurora">{content.type} · {content.estimatedMinutes} min</p>
+                              </div>
+                              {isVisible ? (
+                                <span className="rounded-full border border-aurora/40 bg-aurora/10 px-3 py-1 text-xs text-aurora">
+                                  {content.isPreview && showLocked ? "Preview" : "Disponible"}
+                                </span>
+                              ) : (
+                                <span className="inline-flex items-center gap-2 rounded-full border border-flare/35 bg-flare/10 px-3 py-1 text-xs text-flare">
+                                  <LockKeyhole size={12} />
+                                  Bloqueado
+                                </span>
+                              )}
+                            </div>
+                            <p className="mt-3 leading-7 text-steel">{isVisible ? content.body : "Disponible al confirmar el pago del curso premium."}</p>
+                          </div>
+                        );
+                      })}
                     </div>
                   </div>
                 );
@@ -199,6 +281,103 @@ export const CoursePlayerPage = () => {
                 ))}
               </div>
             </div>
+
+            {showLocked ? (
+              <div className="rounded-[34px] border border-white/10 bg-white/5 p-6">
+                <div className="flex items-center gap-3">
+                  <ShieldCheck className="text-aurora" />
+                  <h2 className="text-xl font-semibold text-sand">Desbloquear curso</h2>
+                </div>
+                <p className="mt-4 text-sm leading-7 text-steel">
+                  La sesion ya se verifica con cookie antes de cargar esta vista. Si compras desde aqui, el acceso premium se habilita en esta pestaña y en el resto al volver a enfocarlas.
+                </p>
+
+                {!profile ? (
+                  <div className="mt-5 rounded-2xl bg-abyss/60 p-4 text-sm text-steel">
+                    <p>Inicia sesion para comprar y desbloquear el resto del contenido.</p>
+                    <div className="mt-4 flex gap-3">
+                      <Link to="/iniciar-sesion" className="rounded-full bg-sand px-4 py-2 text-sm font-medium text-abyss">
+                        Iniciar sesion
+                      </Link>
+                      <Link to="/registrarse" className="rounded-full border border-white/10 px-4 py-2 text-sm text-white">
+                        Registrarse
+                      </Link>
+                    </div>
+                  </div>
+                ) : (
+                  <div className="mt-5 space-y-4 rounded-2xl bg-abyss/60 p-4">
+                    <div className="grid gap-2 sm:grid-cols-3">
+                      {["Mercado Pago", "Visa", "Mastercard"].map((provider) => (
+                        <button
+                          key={provider}
+                          type="button"
+                          onClick={() => setPurchaseProvider(provider)}
+                          className={`rounded-2xl px-4 py-3 text-sm ${purchaseProvider === provider ? "bg-sand text-abyss" : "bg-white/10 text-white"}`}
+                        >
+                          {provider}
+                        </button>
+                      ))}
+                    </div>
+                    {purchaseProvider !== "Mercado Pago" && (
+                      <input
+                        value={purchaseLast4}
+                        onChange={(event) => setPurchaseLast4(event.target.value.replace(/\D/g, "").slice(0, 4))}
+                        className="w-full rounded-2xl border border-white/10 bg-white/5 px-4 py-3 outline-none"
+                        placeholder="Ultimos 4 digitos de la tarjeta"
+                      />
+                    )}
+                    <div className="rounded-2xl border border-aurora/25 bg-aurora/10 p-4 text-sm text-steel">
+                      <p>
+                        {course.commerce?.currency ?? "USD"} {course.price}
+                        {profile.referralSummary?.qualifiedCount ? ` · hasta ${profile.referralSummary.discountPercent}% de descuento por referido activo` : ""}
+                      </p>
+                    </div>
+                    <button
+                      type="button"
+                      disabled={purchasing}
+                      className="w-full rounded-full bg-sand px-5 py-3 text-sm font-medium text-abyss disabled:opacity-60"
+                      onClick={async () => {
+                        setPurchasing(true);
+                        const result = await purchaseCourse(course.slug, {
+                          provider: purchaseProvider,
+                          brand: purchaseProvider,
+                          last4: purchaseProvider === "Mercado Pago" ? "0000" : purchaseLast4
+                        });
+                        setPurchasing(false);
+                        if (result.error) {
+                          setFeedback(result.error);
+                          return;
+                        }
+                        if (result.course) {
+                          setCourse((current) =>
+                            current
+                              ? {
+                                  ...current,
+                                  ...result.course,
+                                  comments: current.comments,
+                                  activity: current.activity
+                                }
+                              : current
+                          );
+                        }
+                        setFeedback("Pago registrado y curso desbloqueado para tu cuenta.");
+                      }}
+                    >
+                      {purchasing ? "Procesando compra..." : `Comprar y desbloquear por ${course.commerce?.currency ?? "USD"} ${course.price}`}
+                    </button>
+                  </div>
+                )}
+              </div>
+            ) : (
+              <div className="rounded-[34px] border border-white/10 bg-white/5 p-6">
+                <h2 className="text-xl font-semibold text-sand">Acceso confirmado</h2>
+                <p className="mt-4 text-sm leading-7 text-steel">
+                  {course.isFree
+                    ? "Esta guia queda abierta como muestra publica del campus."
+                    : `Compra confirmada${course.commerce?.latestPurchase ? ` por ${course.commerce.latestPurchase.provider}` : ""}. Ya puedes completar actividades y comentar.`}
+                </p>
+              </div>
+            )}
 
             <div className="rounded-[34px] border border-white/10 bg-white/5 p-6">
               <h2 className="text-xl font-semibold text-sand">Comentarios y estrellas</h2>
@@ -235,7 +414,12 @@ export const CoursePlayerPage = () => {
                   }
                 }}
               >
-                <textarea value={commentBody} onChange={(event) => setCommentBody(event.target.value)} className="min-h-28 w-full rounded-2xl border border-white/10 bg-white/5 px-4 py-3 outline-none" placeholder={!profile ? "Inicia sesion para comentar" : canAccessPremium ? "Comparte tu opinion sobre el curso" : "Debes desbloquear el curso para comentar"} />
+                <textarea
+                  value={commentBody}
+                  onChange={(event) => setCommentBody(event.target.value)}
+                  className="min-h-28 w-full rounded-2xl border border-white/10 bg-white/5 px-4 py-3 outline-none"
+                  placeholder={!authResolved ? "Verificando sesion..." : !profile ? "Inicia sesion para comentar" : canAccessPremium ? "Comparte tu opinion sobre el curso" : "Debes desbloquear el curso para comentar"}
+                />
                 <div className="flex flex-wrap items-center gap-2">
                   {[1, 2, 3, 4, 5].map((value) => (
                     <button
@@ -274,4 +458,3 @@ export const CoursePlayerPage = () => {
     </div>
   );
 };
-

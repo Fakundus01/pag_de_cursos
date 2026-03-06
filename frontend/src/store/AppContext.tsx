@@ -1,11 +1,22 @@
 import { createContext, useContext, useEffect, useMemo, useState, type ReactNode } from "react";
 import { initialChat, mockCourses } from "../data/mock";
 import { api, getErrorMessage } from "../lib/api";
-import type { ChatMessage, Course, DashboardStats, Trophy, UserProfile } from "../types";
+import type { ChatMessage, ContentBlock, Course, DashboardStats, PurchaseSummary, ReferralRecord, ReferralSummary, Trophy, UserProfile } from "../types";
 
 type AuthForm = {
   email: string;
   password: string;
+};
+
+type PurchaseForm = {
+  provider?: string;
+  brand?: string;
+  last4?: string;
+};
+
+type PurchaseResult = {
+  error: string | null;
+  course: Course | null;
 };
 
 type AppContextValue = {
@@ -19,6 +30,7 @@ type AppContextValue = {
   logout: () => Promise<void>;
   updateProfile: (form: { name: string; avatar: string }) => Promise<string | null>;
   completeSection: (courseSlug: string, sectionId: string) => Promise<string | null>;
+  purchaseCourse: (courseSlug: string, form?: PurchaseForm) => Promise<PurchaseResult>;
   addChatMessage: (body: string) => void;
 };
 
@@ -37,6 +49,51 @@ const normalizeTrophy = (trophy: any): Trophy => ({
   id: String(trophy.id),
   title: trophy.title,
   detail: trophy.detail
+});
+
+const normalizeContentBlock = (content: any): ContentBlock => ({
+  id: Number(content.id),
+  title: content.title,
+  type: content.type,
+  status: content.status,
+  body: content.body,
+  assetUrl: content.assetUrl ?? null,
+  isPreview: Boolean(content.isPreview),
+  estimatedMinutes: Number(content.estimatedMinutes ?? 0),
+  metadata: typeof content.metadata === "object" && content.metadata !== null ? content.metadata : {}
+});
+
+const normalizePurchase = (purchase: any): PurchaseSummary => ({
+  id: Number(purchase.id),
+  courseId: String(purchase.courseId),
+  courseTitle: purchase.courseTitle,
+  provider: purchase.provider,
+  providerReference: purchase.providerReference ?? null,
+  status: purchase.status,
+  currency: purchase.currency,
+  subtotalAmount: Number(purchase.subtotalAmount ?? 0),
+  discountAmount: Number(purchase.discountAmount ?? 0),
+  totalAmount: Number(purchase.totalAmount ?? 0),
+  createdAt: purchase.createdAt ?? null,
+  paidAt: purchase.paidAt ?? null
+});
+
+const normalizeReferralRecord = (referral: any): ReferralRecord => ({
+  id: Number(referral.id),
+  code: referral.code,
+  status: referral.status,
+  rewardPercent: Number(referral.rewardPercent ?? 0),
+  referredUser: referral.referredUser,
+  createdAt: referral.createdAt ?? null,
+  convertedAt: referral.convertedAt ?? null
+});
+
+const normalizeReferralSummary = (summary: any): ReferralSummary => ({
+  sentCount: Number(summary.sentCount ?? 0),
+  qualifiedCount: Number(summary.qualifiedCount ?? 0),
+  rewardedCount: Number(summary.rewardedCount ?? 0),
+  discountPercent: Number(summary.discountPercent ?? 0),
+  recent: Array.isArray(summary.recent) ? summary.recent.map(normalizeReferralRecord) : []
 });
 
 const normalizeCourse = (course: any): Course => ({
@@ -58,9 +115,17 @@ const normalizeCourse = (course: any): Course => ({
         id: String(section.id),
         title: section.title,
         duration: section.duration,
-        completed: Boolean(section.completed)
+        completed: Boolean(section.completed),
+        contentBlocks: Array.isArray(section.contentBlocks) ? section.contentBlocks.map(normalizeContentBlock) : []
       }))
-    : []
+    : [],
+  commerce: course.commerce
+    ? {
+        currency: course.commerce.currency ?? "USD",
+        providers: Array.isArray(course.commerce.providers) ? course.commerce.providers.map(String) : [],
+        latestPurchase: course.commerce.latestPurchase ? normalizePurchase(course.commerce.latestPurchase) : null
+      }
+    : undefined
 });
 
 const normalizeProfile = (profile: any): UserProfile => ({
@@ -77,7 +142,9 @@ const normalizeProfile = (profile: any): UserProfile => ({
     Object.entries(profile.progressByCourse ?? {}).map(([courseId, sectionIds]) => [courseId, Array.isArray(sectionIds) ? sectionIds.map(String) : []])
   ),
   trophies: Array.isArray(profile.trophies) ? profile.trophies.map(normalizeTrophy) : [],
-  isAdmin: Boolean(profile.isAdmin)
+  isAdmin: Boolean(profile.isAdmin),
+  purchaseHistory: Array.isArray(profile.purchaseHistory) ? profile.purchaseHistory.map(normalizePurchase) : [],
+  referralSummary: profile.referralSummary ? normalizeReferralSummary(profile.referralSummary) : null
 });
 
 export const AppProvider = ({ children }: { children: ReactNode }) => {
@@ -86,6 +153,16 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
   const [stats, setStats] = useState<DashboardStats>(emptyStats);
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>(initialChat);
   const [authResolved, setAuthResolved] = useState(false);
+
+  const mergeCourse = (nextCourse: Course) => {
+    setCourses((current) => {
+      const exists = current.some((course) => course.slug === nextCourse.slug);
+      if (!exists) {
+        return [...current, nextCourse];
+      }
+      return current.map((course) => (course.slug === nextCourse.slug ? nextCourse : course));
+    });
+  };
 
   const refreshCourses = async () => {
     try {
@@ -253,6 +330,23 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
           return getErrorMessage(error, "No se pudo guardar el progreso.");
         }
       },
+      purchaseCourse: async (courseSlug, form = {}) => {
+        if (!profile) {
+          return { error: "Debes iniciar sesion para desbloquear cursos premium.", course: null };
+        }
+
+        try {
+          const response = await api.purchaseCourse(courseSlug, form);
+          const normalizedProfile = normalizeProfile(response.profile);
+          const normalizedCourse = normalizeCourse(response.course);
+          setProfile(normalizedProfile);
+          mergeCourse(normalizedCourse);
+          syncTabs("purchase");
+          return { error: null, course: normalizedCourse };
+        } catch (error) {
+          return { error: getErrorMessage(error, "No se pudo procesar la compra."), course: null };
+        }
+      },
       addChatMessage: (body) => {
         const userMessage: ChatMessage = {
           id: crypto.randomUUID(),
@@ -261,8 +355,8 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
         };
         const lowered = body.toLowerCase();
         let answer = "Puedo ayudarte con acceso, pagos, progreso, cursos o soporte.";
-        if (lowered.includes("pago")) answer = "Aceptaremos Mercado Pago, Visa y Mastercard. Puedes guardar tarjetas para compras futuras.";
-        if (lowered.includes("gratis")) answer = "El documento gratuito sirve como muestra. Los cursos premium mantienen candado hasta completar el pago.";
+        if (lowered.includes("pago")) answer = "Puedes desbloquear cursos con Mercado Pago, Visa o Mastercard desde la vista del curso.";
+        if (lowered.includes("gratis")) answer = "El documento gratuito sirve como muestra. Los bloques premium se desbloquean al confirmar la compra.";
         if (lowered.includes("admin")) answer = "El panel admin controla cursos, materiales, analitica, FAQ del chat y base de conocimiento.";
 
         const assistantMessage: ChatMessage = {

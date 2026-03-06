@@ -1,4 +1,5 @@
-const API_URL = import.meta.env.VITE_API_URL ?? "http://127.0.0.1:5000/api";
+const defaultApiOrigin = typeof window !== "undefined" ? `${window.location.protocol}//${window.location.hostname}:5000` : "http://127.0.0.1:5000";
+const API_URL = import.meta.env.VITE_API_URL ?? `${defaultApiOrigin}/api`;
 
 export class ApiError extends Error {
   status: number;
@@ -49,11 +50,13 @@ export const api = {
   stats: () => request<any>("/admin/stats"),
   login: (payload: { email: string; password: string }) =>
     request<{ profile: any }>("/auth/login", { method: "POST", body: JSON.stringify(payload) }),
-  register: (payload: { name: string; email: string; password: string }) =>
+  register: (payload: { name: string; email: string; password: string; referralCode?: string }) =>
     request<{ profile: any }>("/auth/register", { method: "POST", body: JSON.stringify(payload) }),
   logout: () => request<{ ok: boolean }>("/auth/logout", { method: "POST" }),
   completeSection: (slug: string, payload: { sectionId: string }) =>
     request<{ profile: any }>(`/courses/${slug}/progress`, { method: "POST", body: JSON.stringify(payload) }),
   addComment: (slug: string, payload: { body: string; stars: number }) =>
-    request<{ comment: any }>(`/courses/${slug}/comments`, { method: "POST", body: JSON.stringify(payload) })
+    request<{ comment: any }>(`/courses/${slug}/comments`, { method: "POST", body: JSON.stringify(payload) }),
+  purchaseCourse: (slug: string, payload: { provider?: string; brand?: string; last4?: string }) =>
+    request<{ profile: any; course: any; purchase: any }>(`/courses/${slug}/purchase`, { method: "POST", body: JSON.stringify(payload) })
 };
