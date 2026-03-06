@@ -104,7 +104,7 @@ export const HomePage = () => {
           <LockKeyhole className="text-flare" />
           <h3 className="mt-4 text-xl font-semibold text-sand">Pago y desbloqueo</h3>
           <p className="mt-3 text-sm leading-7 text-steel">
-            La API ya diferencia acceso libre y premium, para que el siguiente paso sea enchufar el pago y desbloqueo real.
+            La API ya deja listo el flujo de checkout, consulta de estado y webhook para enchufar el cobro real sin rehacer el dominio.
           </p>
         </div>
         <div className="rounded-[30px] border border-white/10 bg-white/5 p-6">

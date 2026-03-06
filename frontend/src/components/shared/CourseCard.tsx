@@ -1,9 +1,10 @@
-import { LockKeyhole, Star } from "lucide-react";
+import { CheckCircle2, LockKeyhole, Star } from "lucide-react";
 import { Link } from "react-router-dom";
 import type { Course } from "../../types";
 
 export const CourseCard = ({ course, progress = 0 }: { course: Course; progress?: number }) => {
   const showLocked = course.locked && !course.isUnlocked;
+  const isCompleted = progress >= 100;
 
   return (
     <article className="group relative overflow-hidden rounded-[30px] border border-white/10 bg-white/[0.06] p-6 shadow-glow backdrop-blur-xl transition hover:-translate-y-1 hover:border-aurora/35">
@@ -15,7 +16,12 @@ export const CourseCard = ({ course, progress = 0 }: { course: Course; progress?
             <h3 className="mt-4 text-2xl font-semibold text-sand">{course.title}</h3>
             <p className="mt-2 text-sm text-steel">{course.subtitle}</p>
           </div>
-          {showLocked ? (
+          {isCompleted ? (
+            <span className="inline-flex items-center gap-2 rounded-full border border-aurora/35 bg-aurora/10 px-3 py-1 text-xs text-aurora">
+              <CheckCircle2 size={14} />
+              Completado
+            </span>
+          ) : showLocked ? (
             <span className="inline-flex items-center gap-2 rounded-full border border-flare/35 bg-flare/10 px-3 py-1 text-xs text-flare">
               <LockKeyhole size={14} />
               Premium
@@ -53,6 +59,7 @@ export const CourseCard = ({ course, progress = 0 }: { course: Course; progress?
           <div className="h-2 rounded-full bg-white/10">
             <div className="h-2 rounded-full bg-gradient-to-r from-aurora to-flare" style={{ width: `${progress}%` }} />
           </div>
+          <p className="mt-3 text-xs text-steel">{isCompleted ? "Ruta dominada. Ya aparece como hecha en tu perfil." : "Sigue avanzando para completar toda la ruta."}</p>
         </div>
 
         <div className="mt-7 flex items-center justify-between">
@@ -63,7 +70,7 @@ export const CourseCard = ({ course, progress = 0 }: { course: Course; progress?
             rel="noreferrer"
             className={`rounded-full px-4 py-2 text-sm font-medium ${showLocked ? "bg-white/10 text-white" : "bg-sand text-abyss"}`}
           >
-            {showLocked ? "Ver demo" : "Abrir curso"}
+            {showLocked ? "Ver demo" : isCompleted ? "Repasar curso" : "Abrir curso"}
           </Link>
         </div>
       </div>

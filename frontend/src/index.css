@@ -36,3 +36,93 @@ textarea {
   background: rgba(140, 198, 187, 0.35);
   color: #fff;
 }
+
+@keyframes completion-pop {
+  0% {
+    opacity: 0;
+    transform: translateY(32px) scale(0.84);
+  }
+  60% {
+    opacity: 1;
+    transform: translateY(-4px) scale(1.02);
+  }
+  100% {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+@keyframes completion-shimmer {
+  0% {
+    transform: translateX(-160%) rotate(18deg);
+  }
+  100% {
+    transform: translateX(220%) rotate(18deg);
+  }
+}
+
+@keyframes completion-star {
+  0% {
+    opacity: 0;
+    transform: translate3d(0, 22px, 0) scale(0.45) rotate(0deg);
+  }
+  25% {
+    opacity: 0.95;
+  }
+  100% {
+    opacity: 0;
+    transform: translate3d(0, -26px, 0) scale(1.14) rotate(24deg);
+  }
+}
+
+.course-complete-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 80;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background:
+    radial-gradient(circle at top, rgba(140, 198, 187, 0.22), transparent 38%),
+    radial-gradient(circle at bottom, rgba(242, 178, 107, 0.18), transparent 36%),
+    rgba(6, 15, 22, 0.82);
+  backdrop-filter: blur(14px);
+}
+
+.course-complete-card {
+  position: relative;
+  width: min(92vw, 520px);
+  overflow: hidden;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 36px;
+  padding: 34px 30px 30px;
+  background: linear-gradient(180deg, rgba(17, 56, 77, 0.96) 0%, rgba(8, 26, 36, 0.98) 100%);
+  box-shadow: 0 28px 70px rgba(0, 0, 0, 0.32);
+  animation: completion-pop 0.6s ease forwards;
+}
+
+.course-complete-card::before {
+  content: "";
+  position: absolute;
+  inset: -30% auto auto -25%;
+  width: 42%;
+  height: 180%;
+  background: linear-gradient(180deg, transparent, rgba(255, 255, 255, 0.16), transparent);
+  transform: rotate(18deg);
+  animation: completion-shimmer 2.6s ease-in-out infinite;
+}
+
+.course-complete-stars {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+
+.course-complete-star {
+  position: absolute;
+  opacity: 0;
+  filter: drop-shadow(0 0 12px rgba(242, 178, 107, 0.4));
+  animation-name: completion-star;
+  animation-timing-function: ease-in-out;
+  animation-iteration-count: infinite;
+}

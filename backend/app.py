@@ -745,6 +745,86 @@ def build_purchase_amounts(course: Course, user: User) -> tuple[Decimal, Decimal
     return subtotal, discount, total, referral
 
 
+def eligible_referral_for_discount(user: User) -> Referral | None:
+    referral = user.referral_attribution
+    if referral is None or referral.status != "qualified":
+        return None
+    return referral
+
+
+def calculate_checkout_amounts(course: Course, referral: Referral | None) -> tuple[Decimal, Decimal, Decimal]:
+    subtotal = Decimal(str(course.price)).quantize(Decimal("0.01"))
+    discount = Decimal("0.00")
+    if referral is not None:
+        discount = (subtotal * Decimal(referral.reward_percent) / Decimal("100")).quantize(Decimal("0.01"))
+    total = (subtotal - discount).quantize(Decimal("0.01"))
+    return subtotal, discount, total
+
+
+def build_purchase_reference(course: Course, user: User, prefix: str = "checkout") -> str:
+    return f"{prefix}-{course.slug}-{user.id}-{datetime.utcnow().strftime('%Y%m%d%H%M%S%f')}"
+
+
+def normalize_payment_status(value: object) -> str:
+    raw = str(value or "pending").strip().lower()
+    if raw in {"paid", "approved", "success", "succeeded"}:
+        return "paid"
+    if raw in {"failed", "rejected", "cancelled", "canceled"}:
+        return "failed"
+    return "pending"
+
+
+def webhook_secret_is_valid() -> bool:
+    expected = os.getenv("PAYMENT_WEBHOOK_SECRET", "").strip()
+    if not expected:
+        return True
+    provided = request.headers.get("X-Webhook-Secret", "").strip()
+    return provided == expected
+
+
+def serialize_checkout_session(purchase: Purchase) -> dict:
+    provider = normalize_provider_label(purchase.provider)
+    provider_slug = provider.lower().replace(" ", "-")
+    frontend_origin = parse_frontend_origins()[0]
+    return {
+        "reference": purchase.provider_reference,
+        "provider": provider,
+        "status": purchase.status,
+        "currency": purchase.currency,
+        "amount": amount_to_float(purchase.total_amount),
+        "discountAmount": amount_to_float(purchase.discount_amount),
+        "sandboxMode": True,
+        "nextAction": "redirect" if provider == "Mercado Pago" else "confirm_card",
+        "statusUrl": f"/api/payments/{purchase.provider_reference}",
+        "webhookPath": f"/api/payments/webhooks/{provider_slug}",
+        "successUrl": f"{frontend_origin}/perfil",
+    }
+
+
+def activate_paid_purchase(purchase: Purchase) -> None:
+    was_paid = purchase.status == "paid"
+    purchase.status = "paid"
+    if purchase.paid_at is None:
+        purchase.paid_at = datetime.utcnow()
+
+    enrollment = Enrollment.query.filter_by(user_id=purchase.user_id, course_id=purchase.course_id).first()
+    created_enrollment = False
+    if enrollment is None:
+        enrollment = Enrollment(user_id=purchase.user_id, course_id=purchase.course_id, purchased=True)
+        db.session.add(enrollment)
+        db.session.flush()
+        created_enrollment = True
+    else:
+        enrollment.purchased = True
+
+    if purchase.referral is not None and purchase.referral.status == "qualified":
+        purchase.referral.status = "rewarded"
+        purchase.referral.converted_at = datetime.utcnow()
+
+    if created_enrollment and not was_paid:
+        purchase.course.students += 1
+
+
 def register_routes(app: Flask) -> None:
     @app.get("/api/health")
     def health():
@@ -874,6 +954,94 @@ def register_routes(app: Flask) -> None:
         db.session.commit()
         return jsonify({"profile": serialize_profile(user)})
 
+    @app.post("/api/courses/<slug>/checkout")
+    @login_required
+    def create_checkout(user: User, slug: str):
+        course = Course.query.filter_by(slug=slug).first_or_404()
+        if course.is_free:
+            return jsonify({"error": "This course is already free"}), 400
+
+        existing_purchase = paid_purchase_for_user(user, course)
+        if existing_purchase is not None:
+            return jsonify({
+                "course": serialize_course(course, user),
+                "purchase": serialize_purchase(existing_purchase),
+                "checkout": serialize_checkout_session(existing_purchase),
+            })
+
+        data = request.get_json(silent=True) or {}
+        provider_label = normalize_provider_label(data.get("provider") or data.get("brand") or "Mercado Pago")
+
+        try:
+            payment_method = build_checkout_payment_method(user, provider_label, data.get("last4"))
+        except ValueError as exc:
+            return jsonify({"error": str(exc)}), 400
+
+        referral = eligible_referral_for_discount(user)
+        subtotal, discount, total = calculate_checkout_amounts(course, referral)
+        purchase = ensure_purchase(
+            user,
+            course,
+            provider_reference=build_purchase_reference(course, user, "checkout"),
+            payment_method=payment_method,
+            subtotal_amount=subtotal,
+            discount_amount=discount,
+            total_amount=total,
+            status="pending",
+            provider=provider_label,
+            referral=referral,
+        )
+        db.session.commit()
+        return jsonify({
+            "course": serialize_course(course, user),
+            "purchase": serialize_purchase(purchase),
+            "checkout": serialize_checkout_session(purchase),
+        }), 201
+
+    @app.get("/api/payments/<reference>")
+    @login_required
+    def get_payment_status(user: User, reference: str):
+        purchase = Purchase.query.filter_by(provider_reference=reference, user_id=user.id).first()
+        if purchase is None:
+            return jsonify({"error": "Purchase not found"}), 404
+        return jsonify({
+            "purchase": serialize_purchase(purchase),
+            "course": serialize_course(purchase.course, user),
+            "checkout": serialize_checkout_session(purchase),
+        })
+
+    @app.post("/api/payments/webhooks/<provider>")
+    def payment_webhook(provider: str):
+        if not webhook_secret_is_valid():
+            return jsonify({"error": "Invalid webhook secret"}), 403
+
+        data = request.get_json(silent=True) or {}
+        reference = str(data.get("reference") or data.get("providerReference") or "").strip()
+        if not reference:
+            return jsonify({"error": "Payment reference is required"}), 400
+
+        purchase = Purchase.query.filter_by(provider_reference=reference).first()
+        if purchase is None:
+            return jsonify({"error": "Purchase not found"}), 404
+
+        purchase.provider = normalize_provider_label(provider)
+        status = normalize_payment_status(data.get("status"))
+
+        if status == "paid":
+            activate_paid_purchase(purchase)
+        else:
+            purchase.status = status
+            if status != "paid":
+                purchase.paid_at = None
+
+        db.session.commit()
+        return jsonify({
+            "ok": True,
+            "purchase": serialize_purchase(purchase),
+            "course": serialize_course(purchase.course, purchase.user),
+            "checkout": serialize_checkout_session(purchase),
+        })
+
     @app.post("/api/courses/<slug>/purchase")
     @login_required
     def purchase_course(user: User, slug: str):
@@ -904,22 +1072,16 @@ def register_routes(app: Flask) -> None:
         purchase = ensure_purchase(
             user,
             course,
-            provider_reference=f"checkout-{course.slug}-{user.id}-{int(datetime.utcnow().timestamp())}",
+            provider_reference=build_purchase_reference(course, user, "instant"),
             payment_method=payment_method,
             subtotal_amount=subtotal,
             discount_amount=discount,
             total_amount=total,
+            status="pending",
             provider=provider_label,
             referral=referral,
         )
-
-        previous_enrollment = Enrollment.query.filter_by(user_id=user.id, course_id=course.id).first()
-        enrollment = get_or_create_enrollment(user, course)
-        if enrollment is not None:
-            enrollment.purchased = True
-
-        if previous_enrollment is None:
-            course.students += 1
+        activate_paid_purchase(purchase)
 
         db.session.commit()
         return jsonify({"profile": serialize_profile(user), "course": serialize_course(course, user), "purchase": serialize_purchase(purchase)}), 201
