@@ -72,6 +72,12 @@ export type ReferralSummary = {
   recent: ReferralRecord[];
 };
 
+export type EmailDelivery = {
+  mode: string;
+  sent: boolean;
+  previewUrl?: string | null;
+};
+
 export type CourseCommerce = {
   currency: string;
   providers: string[];
@@ -118,6 +124,7 @@ export type Trophy = {
 export type UserProfile = {
   name: string;
   email: string;
+  emailVerified: boolean;
   avatar: string;
   streakDays: number;
   referralCode: string;

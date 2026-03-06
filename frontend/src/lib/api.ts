@@ -1,4 +1,4 @@
-import type { AdminCoursePayload, CheckoutSession, SupportChatReply, SupportContent } from "../types";
+import type { AdminCoursePayload, CheckoutSession, EmailDelivery, SupportChatReply, SupportContent } from "../types";
 
 const defaultApiOrigin = typeof window !== "undefined" ? `${window.location.protocol}//${window.location.hostname}:5000` : "http://127.0.0.1:5000";
 const API_URL = import.meta.env.VITE_API_URL ?? `${defaultApiOrigin}/api`;
@@ -7,11 +7,13 @@ const CSRF_HEADER_NAME = "X-CSRF-Token";
 
 export class ApiError extends Error {
   status: number;
+  data?: unknown;
 
-  constructor(message: string, status: number) {
+  constructor(message: string, status: number, data?: unknown) {
     super(message);
     this.name = "ApiError";
     this.status = status;
+    this.data = data;
   }
 }
 
@@ -66,7 +68,7 @@ const fetchCsrfToken = async (force = false) => {
   const token = extractCsrfToken(payload);
 
   if (!response.ok) {
-    throw new ApiError((payload as { error?: string } | null)?.error ?? `Request failed: ${response.status}`, response.status);
+    throw new ApiError((payload as { error?: string } | null)?.error ?? `Request failed: ${response.status}`, response.status, payload);
   }
 
   storeCsrfToken(token);
@@ -112,7 +114,7 @@ async function request<T>(path: string, init?: RequestInit, options: RequestOpti
       await fetchCsrfToken(true).catch(() => null);
       return request(path, init, { ...options, csrfRetry: false });
     }
-    throw new ApiError(message, response.status);
+    throw new ApiError(message, response.status, payload);
   }
 
   return payload as T;
@@ -140,9 +142,17 @@ export const api = {
     request<{ profile: any }>("/profile", { method: "PATCH", body: JSON.stringify(payload) }),
   stats: () => request<any>("/admin/stats"),
   login: (payload: { email: string; password: string }) =>
-    request<{ profile: any; csrfToken?: string }>("/auth/login", { method: "POST", body: JSON.stringify(payload) }),
+    request<{ profile?: any; csrfToken?: string }>("/auth/login", { method: "POST", body: JSON.stringify(payload) }),
   register: (payload: { name: string; email: string; password: string; referralCode?: string }) =>
-    request<{ profile: any; csrfToken?: string }>("/auth/register", { method: "POST", body: JSON.stringify(payload) }),
+    request<{ profile?: any; pendingVerification?: boolean; email?: string; message?: string; delivery?: EmailDelivery | null; csrfToken?: string }>("/auth/register", { method: "POST", body: JSON.stringify(payload) }),
+  verifyEmail: (token: string) =>
+    request<{ profile: any; verified: boolean; message?: string; csrfToken?: string }>(`/auth/verify-email?token=${encodeURIComponent(token)}`, undefined, { skipCsrf: true }),
+  resendVerification: (payload: { email: string }) =>
+    request<{ ok: boolean; message?: string; delivery?: EmailDelivery | null; csrfToken?: string }>("/auth/resend-verification", { method: "POST", body: JSON.stringify(payload) }),
+  requestPasswordReset: (payload: { email: string }) =>
+    request<{ ok: boolean; message?: string; delivery?: EmailDelivery | null; csrfToken?: string }>("/auth/request-password-reset", { method: "POST", body: JSON.stringify(payload) }),
+  resetPassword: (payload: { token: string; password: string }) =>
+    request<{ ok: boolean; message?: string; csrfToken?: string }>("/auth/reset-password", { method: "POST", body: JSON.stringify(payload) }),
   logout: () => request<{ ok: boolean; csrfToken?: string }>("/auth/logout", { method: "POST" }),
   completeSection: (slug: string, payload: { sectionId: string }) =>
     request<{ profile: any }>(`/courses/${slug}/progress`, { method: "POST", body: JSON.stringify(payload) }),

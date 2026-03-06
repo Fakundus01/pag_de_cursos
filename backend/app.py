@@ -6,12 +6,14 @@ import json
 import os
 import re
 import secrets
+import smtplib
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
 from datetime import datetime, timedelta
 from decimal import Decimal
+from email.message import EmailMessage
 from functools import wraps
 from threading import Lock
 
@@ -19,7 +21,7 @@ from flask import Flask, jsonify, request, session
 from flask_cors import CORS
 from werkzeug.security import check_password_hash, generate_password_hash
 
-from models import Comment, Course, CourseSection, Enrollment, PaymentMethod, Progress, Purchase, Referral, SectionContent, SupportEntry, User, db
+from models import AuthToken, Comment, Course, CourseSection, EmailStatus, Enrollment, PaymentMethod, Progress, Purchase, Referral, SectionContent, SupportEntry, User, db
 
 
 DATABASE_PATH = os.path.join(os.path.dirname(__file__), "academy.db")
@@ -40,6 +42,8 @@ DEFAULT_SUPPORT_KNOWLEDGE = [
 
 RATE_LIMIT_STATE: dict[str, list[float]] = {}
 RATE_LIMIT_LOCK = Lock()
+EMAIL_VERIFY_TOKEN_TYPE = "email_verify"
+PASSWORD_RESET_TOKEN_TYPE = "password_reset"
 
 
 COURSE_BLUEPRINTS = [
@@ -184,6 +188,54 @@ def seed_demo_users_enabled() -> bool:
 
 def demo_payments_enabled() -> bool:
     return env_bool("ENABLE_DEMO_PAYMENTS", True)
+
+
+def email_verification_required() -> bool:
+    return env_bool("EMAIL_VERIFICATION_REQUIRED", True)
+
+
+def email_delivery_mode() -> str:
+    configured = os.getenv("EMAIL_DELIVERY_MODE", "").strip().lower()
+    if configured in {"smtp", "log"}:
+        return configured
+    return "smtp" if os.getenv("SMTP_HOST", "").strip() else "log"
+
+
+def email_dev_preview_enabled() -> bool:
+    return env_bool("EMAIL_DEV_PREVIEW", True)
+
+
+def email_subject_prefix() -> str:
+    return os.getenv("EMAIL_SUBJECT_PREFIX", "Starcraft Academy").strip() or "Starcraft Academy"
+
+
+def smtp_host() -> str:
+    return os.getenv("SMTP_HOST", "").strip()
+
+
+def smtp_port() -> int:
+    default_port = 465 if env_bool("SMTP_USE_SSL", False) else 587
+    return env_int("SMTP_PORT", default_port)
+
+
+def smtp_from_email() -> str:
+    return os.getenv("SMTP_FROM_EMAIL", "noreply@starcraft.academy").strip() or "noreply@starcraft.academy"
+
+
+def smtp_from_name() -> str:
+    return os.getenv("SMTP_FROM_NAME", email_subject_prefix()).strip() or email_subject_prefix()
+
+
+def email_preview_log_path() -> str:
+    return os.getenv("EMAIL_PREVIEW_LOG_PATH", os.path.join(os.path.dirname(__file__), "instance", "email_previews.log")).strip()
+
+
+def verification_token_lifetime() -> timedelta:
+    return timedelta(hours=max(1, env_int("EMAIL_VERIFICATION_TOKEN_HOURS", 24)))
+
+
+def password_reset_token_lifetime() -> timedelta:
+    return timedelta(minutes=max(5, env_int("PASSWORD_RESET_TOKEN_MINUTES", 30)))
 
 
 def csrf_header_name() -> str:
@@ -747,6 +799,9 @@ def seed_data() -> None:
         ensure_comment(raynor, protoss, "El curso premium deja clara la progresion por secciones.", 4)
 
     ensure_bootstrap_admin()
+    for user in User.query.order_by(User.id.asc()).all():
+        if user.email_status is None:
+            ensure_email_status(user, verified=True)
     db.session.commit()
 
 
@@ -1142,6 +1197,7 @@ def serialize_profile(user: User) -> dict:
     return {
         "name": user.name,
         "email": user.email,
+        "emailVerified": email_is_verified(user),
         "avatar": user.avatar,
         "streakDays": user.streak_days,
         "referralCode": user.referral_code,
@@ -1176,6 +1232,8 @@ def login_required(fn):
         user = current_user()
         if not user:
             return jsonify({"error": "Not authenticated"}), 401
+        if email_verification_required() and not email_is_verified(user):
+            return jsonify({"error": "Verify your email before continuing.", "verificationRequired": True, "email": user.email}), 403
         return fn(user, *args, **kwargs)
 
     return wrapper
@@ -1187,6 +1245,8 @@ def admin_required(fn):
         user = current_user()
         if not user or not user.is_admin:
             return jsonify({"error": "Admin only"}), 403
+        if email_verification_required() and not email_is_verified(user):
+            return jsonify({"error": "Verify your email before continuing.", "verificationRequired": True, "email": user.email}), 403
         return fn(user, *args, **kwargs)
 
     return wrapper
@@ -1197,6 +1257,166 @@ def validate_email_address(value: str) -> str:
     if not EMAIL_REGEX.match(normalized):
         raise ValueError("Invalid email format")
     return normalized
+
+
+def ensure_email_status(user: User, *, verified: bool | None = None) -> EmailStatus:
+    status = user.email_status or EmailStatus.query.filter_by(user_id=user.id).first()
+    if status is None:
+        status = EmailStatus(user_id=user.id, email=user.email)
+        db.session.add(status)
+        db.session.flush()
+
+    if status.email != user.email:
+        status.email = user.email
+        if verified is None:
+            status.verified_at = None
+
+    if verified is True and status.verified_at is None:
+        status.verified_at = datetime.utcnow()
+    elif verified is False:
+        status.verified_at = None
+
+    return status
+
+
+def email_is_verified(user: User) -> bool:
+    if not email_verification_required():
+        return True
+    status = user.email_status or EmailStatus.query.filter_by(user_id=user.id).first()
+    return bool(status and status.verified_at is not None)
+
+
+def auth_token_digest(raw_token: str) -> str:
+    return hashlib.sha256(raw_token.encode("utf-8")).hexdigest()
+
+
+def build_email_action_url(token_type: str, raw_token: str) -> str:
+    route = "/verificar-email" if token_type == EMAIL_VERIFY_TOKEN_TYPE else "/restablecer-contrasena"
+    encoded_token = urllib.parse.quote(raw_token, safe="")
+    return f"{frontend_public_origin().rstrip('/')}{route}?token={encoded_token}"
+
+
+def issue_auth_token(user: User, token_type: str, lifetime: timedelta) -> tuple[AuthToken, str]:
+    AuthToken.query.filter_by(user_id=user.id, token_type=token_type, consumed_at=None).delete(synchronize_session=False)
+    raw_token = secrets.token_urlsafe(32)
+    token = AuthToken(
+        user_id=user.id,
+        token_type=token_type,
+        token_digest=auth_token_digest(raw_token),
+        email_snapshot=user.email,
+        expires_at=datetime.utcnow() + lifetime,
+    )
+    db.session.add(token)
+    db.session.flush()
+    return token, raw_token
+
+
+def lookup_auth_token(raw_token: str, token_type: str) -> AuthToken | None:
+    normalized = str(raw_token or "").strip()
+    if not normalized:
+        return None
+    token = AuthToken.query.filter_by(token_type=token_type, token_digest=auth_token_digest(normalized)).first()
+    if token is None or token.consumed_at is not None or token.expires_at <= datetime.utcnow():
+        return None
+    return token
+
+
+def consume_user_tokens(user: User, token_type: str, *, exclude_token_id: int | None = None) -> None:
+    query = AuthToken.query.filter_by(user_id=user.id, token_type=token_type, consumed_at=None)
+    if exclude_token_id is not None:
+        query = query.filter(AuthToken.id != exclude_token_id)
+    query.update({"consumed_at": datetime.utcnow()}, synchronize_session=False)
+
+
+def deliver_email_message(*, recipient: str, subject: str, body: str, preview_url: str | None = None) -> dict:
+    mode = email_delivery_mode()
+    if mode == "smtp":
+        host = smtp_host()
+        if not host:
+            raise RuntimeError("SMTP host is not configured")
+
+        message = EmailMessage()
+        sender_email = smtp_from_email()
+        sender_name = smtp_from_name()
+        message["Subject"] = subject
+        message["From"] = f"{sender_name} <{sender_email}>" if sender_name else sender_email
+        message["To"] = recipient
+        message.set_content(body)
+
+        username = os.getenv("SMTP_USERNAME", "").strip()
+        password = os.getenv("SMTP_PASSWORD", "").strip()
+        use_ssl = env_bool("SMTP_USE_SSL", False)
+        use_tls = env_bool("SMTP_USE_TLS", not use_ssl)
+
+        try:
+            if use_ssl:
+                with smtplib.SMTP_SSL(host, smtp_port(), timeout=20) as server:
+                    if username:
+                        server.login(username, password)
+                    server.send_message(message)
+            else:
+                with smtplib.SMTP(host, smtp_port(), timeout=20) as server:
+                    server.ehlo()
+                    if use_tls:
+                        server.starttls()
+                        server.ehlo()
+                    if username:
+                        server.login(username, password)
+                    server.send_message(message)
+        except (OSError, smtplib.SMTPException) as exc:
+            raise RuntimeError(f"Could not send email: {exc}") from exc
+
+        return {"mode": "smtp", "sent": True, "previewUrl": None}
+
+    log_path = email_preview_log_path()
+    os.makedirs(os.path.dirname(log_path), exist_ok=True)
+    with open(log_path, "a", encoding="utf-8") as handle:
+        handle.write(f"[{datetime.utcnow().isoformat()}] TO: {recipient}\n")
+        handle.write(f"SUBJECT: {subject}\n")
+        handle.write(body)
+        handle.write("\n" + ("-" * 72) + "\n")
+
+    return {
+        "mode": "log",
+        "sent": True,
+        "previewUrl": preview_url if email_dev_preview_enabled() else None,
+    }
+
+
+def send_verification_email(user: User) -> dict:
+    status = ensure_email_status(user, verified=False)
+    _token, raw_token = issue_auth_token(user, EMAIL_VERIFY_TOKEN_TYPE, verification_token_lifetime())
+    status.last_verification_sent_at = datetime.utcnow()
+    preview_url = build_email_action_url(EMAIL_VERIFY_TOKEN_TYPE, raw_token)
+    subject = f"{email_subject_prefix()} - Verifica tu email"
+    body = "\n\n".join([
+        f"Hola {user.name},",
+        "Tu cuenta ya fue creada. Verifica tu email para activar el login, compras y progreso sincronizado.",
+        preview_url,
+        "Si no pediste esta cuenta, puedes ignorar este mensaje.",
+    ])
+    return deliver_email_message(recipient=user.email, subject=subject, body=body, preview_url=preview_url)
+
+
+def send_password_reset_email(user: User) -> dict:
+    _token, raw_token = issue_auth_token(user, PASSWORD_RESET_TOKEN_TYPE, password_reset_token_lifetime())
+    preview_url = build_email_action_url(PASSWORD_RESET_TOKEN_TYPE, raw_token)
+    subject = f"{email_subject_prefix()} - Restablece tu contrasena"
+    body = "\n\n".join([
+        f"Hola {user.name},",
+        "Recibimos una solicitud para restablecer tu contrasena.",
+        preview_url,
+        "Si no fuiste tu, ignora este mensaje y tu contrasena seguira igual.",
+    ])
+    return deliver_email_message(recipient=user.email, subject=subject, body=body, preview_url=preview_url)
+
+
+def public_delivery_payload(delivery: dict | None) -> dict | None:
+    if delivery is None:
+        return None
+    if email_dev_preview_enabled() or delivery.get("sent") is False:
+        return delivery
+    return {"mode": delivery.get("mode"), "sent": delivery.get("sent", False), "previewUrl": None}
 
 
 def get_or_create_enrollment(user: User, course: Course) -> Enrollment | None:
@@ -1570,6 +1790,34 @@ def register_routes(app: Flask) -> None:
     def csrf_token():
         return jsonify({"csrfToken": issue_csrf_token()})
 
+    @app.get("/api/auth/verify-email")
+    @rate_limit("auth-verify-email", limit_env="RATE_LIMIT_AUTH_VERIFY_EMAIL", limit_default=20, window_env="RATE_LIMIT_AUTH_VERIFY_EMAIL_WINDOW", window_default=3600)
+    def verify_email():
+        raw_token = request.args.get("token", "").strip()
+        token = lookup_auth_token(raw_token, EMAIL_VERIFY_TOKEN_TYPE)
+        if token is None:
+            return jsonify({"error": "Verification link is invalid or expired."}), 400
+
+        user = db.session.get(User, token.user_id)
+        if user is None:
+            return jsonify({"error": "User not found."}), 404
+
+        status = ensure_email_status(user, verified=True)
+        status.email = user.email
+        token.consumed_at = datetime.utcnow()
+        consume_user_tokens(user, EMAIL_VERIFY_TOKEN_TYPE, exclude_token_id=token.id)
+        db.session.commit()
+
+        session.clear()
+        session.permanent = True
+        session["user_id"] = user.id
+        return jsonify({
+            "profile": serialize_profile(user),
+            "verified": True,
+            "message": "Email verified successfully.",
+            "csrfToken": issue_csrf_token(force=True),
+        })
+
     @app.post("/api/auth/register")
     @rate_limit("auth-register", limit_env="RATE_LIMIT_AUTH_REGISTER", limit_default=6, window_env="RATE_LIMIT_AUTH_REGISTER_WINDOW", window_default=600)
     def register():
@@ -1625,11 +1873,125 @@ def register_routes(app: Flask) -> None:
         if free_course is not None:
             db.session.add(Enrollment(user_id=user.id, course_id=free_course.id, purchased=True))
 
+        if email_verification_required():
+            ensure_email_status(user, verified=False)
+            delivery = None
+            message = "Account created. Check your email to verify it before logging in."
+            try:
+                delivery = send_verification_email(user)
+            except RuntimeError:
+                delivery = {"mode": email_delivery_mode(), "sent": False, "previewUrl": None}
+                message = "Account created, but we could not send the verification email yet. Use resend verification."
+            db.session.commit()
+            session.clear()
+            return jsonify({
+                "ok": True,
+                "pendingVerification": True,
+                "email": user.email,
+                "message": message,
+                "delivery": public_delivery_payload(delivery),
+                "csrfToken": issue_csrf_token(force=True),
+            }), 201
+
+        ensure_email_status(user, verified=True)
         db.session.commit()
         session.clear()
         session.permanent = True
         session["user_id"] = user.id
-        return jsonify({"profile": serialize_profile(user), "csrfToken": issue_csrf_token(force=True)}), 201
+        return jsonify({
+            "profile": serialize_profile(user),
+            "message": "Account created successfully.",
+            "csrfToken": issue_csrf_token(force=True),
+        }), 201
+
+    @app.post("/api/auth/resend-verification")
+    @rate_limit("auth-resend-verification", limit_env="RATE_LIMIT_AUTH_RESEND_VERIFICATION", limit_default=6, window_env="RATE_LIMIT_AUTH_RESEND_VERIFICATION_WINDOW", window_default=900)
+    def resend_verification():
+        data = request.get_json(silent=True) or {}
+        raw_email = str(data.get("email", "")).strip()
+        message = "If the account exists and is still pending, we sent a verification email."
+        delivery = None
+
+        try:
+            email = validate_email_address(raw_email) if raw_email else ""
+        except ValueError:
+            email = ""
+
+        if email:
+            user = User.query.filter_by(email=email).first()
+            if user is not None:
+                status = ensure_email_status(user)
+                if status.verified_at is None:
+                    try:
+                        delivery = send_verification_email(user)
+                    except RuntimeError:
+                        delivery = {"mode": email_delivery_mode(), "sent": False, "previewUrl": None}
+                    db.session.commit()
+
+        return jsonify({
+            "ok": True,
+            "message": message,
+            "delivery": public_delivery_payload(delivery),
+            "csrfToken": issue_csrf_token(force=True),
+        })
+
+    @app.post("/api/auth/request-password-reset")
+    @rate_limit("auth-request-password-reset", limit_env="RATE_LIMIT_AUTH_PASSWORD_RESET", limit_default=6, window_env="RATE_LIMIT_AUTH_PASSWORD_RESET_WINDOW", window_default=900)
+    def request_password_reset():
+        data = request.get_json(silent=True) or {}
+        raw_email = str(data.get("email", "")).strip()
+        message = "If the account exists, we sent a password reset link."
+        delivery = None
+
+        try:
+            email = validate_email_address(raw_email) if raw_email else ""
+        except ValueError:
+            email = ""
+
+        if email:
+            user = User.query.filter_by(email=email).first()
+            if user is not None:
+                try:
+                    delivery = send_password_reset_email(user)
+                except RuntimeError:
+                    delivery = {"mode": email_delivery_mode(), "sent": False, "previewUrl": None}
+                db.session.commit()
+
+        return jsonify({
+            "ok": True,
+            "message": message,
+            "delivery": public_delivery_payload(delivery),
+            "csrfToken": issue_csrf_token(force=True),
+        })
+
+    @app.post("/api/auth/reset-password")
+    @rate_limit("auth-reset-password", limit_env="RATE_LIMIT_AUTH_RESET_PASSWORD", limit_default=10, window_env="RATE_LIMIT_AUTH_RESET_PASSWORD_WINDOW", window_default=3600)
+    def reset_password():
+        data = request.get_json(force=True)
+        raw_token = str(data.get("token", "")).strip()
+        password = str(data.get("password", ""))
+        if len(password) < 6:
+            return jsonify({"error": "Password must have at least 6 characters"}), 400
+
+        token = lookup_auth_token(raw_token, PASSWORD_RESET_TOKEN_TYPE)
+        if token is None:
+            return jsonify({"error": "Reset link is invalid or expired."}), 400
+
+        user = db.session.get(User, token.user_id)
+        if user is None:
+            return jsonify({"error": "User not found."}), 404
+
+        user.password_hash = generate_password_hash(password)
+        token.consumed_at = datetime.utcnow()
+        consume_user_tokens(user, PASSWORD_RESET_TOKEN_TYPE, exclude_token_id=token.id)
+        db.session.commit()
+
+        session.clear()
+        return jsonify({
+            "ok": True,
+            "message": "Password updated. You can log in now.",
+            "csrfToken": issue_csrf_token(force=True),
+        })
 
     @app.post("/api/auth/login")
     @rate_limit("auth-login", limit_env="RATE_LIMIT_AUTH_LOGIN", limit_default=10, window_env="RATE_LIMIT_AUTH_LOGIN_WINDOW", window_default=600)
@@ -1640,6 +2002,14 @@ def register_routes(app: Flask) -> None:
         user = User.query.filter_by(email=email).first()
         if not user or not check_password_hash(user.password_hash, password):
             return jsonify({"error": "Invalid credentials"}), 401
+        if email_verification_required() and not email_is_verified(user):
+            session.clear()
+            return jsonify({
+                "error": "Verify your email before logging in.",
+                "verificationRequired": True,
+                "email": user.email,
+                "csrfToken": issue_csrf_token(force=True),
+            }), 403
 
         session.clear()
         session.permanent = True

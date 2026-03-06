@@ -34,6 +34,8 @@ class User(db.Model):
     comments = db.relationship("Comment", back_populates="user", cascade="all, delete-orphan")
     payment_methods = db.relationship("PaymentMethod", back_populates="user", cascade="all, delete-orphan")
     purchases = db.relationship("Purchase", back_populates="user", cascade="all, delete-orphan")
+    email_status = db.relationship("EmailStatus", back_populates="user", uselist=False, cascade="all, delete-orphan")
+    auth_tokens = db.relationship("AuthToken", back_populates="user", cascade="all, delete-orphan")
     referrals_sent = db.relationship(
         "Referral",
         foreign_keys="Referral.referrer_user_id",
@@ -192,6 +194,31 @@ class SectionContent(db.Model):
 
     section = db.relationship("CourseSection", back_populates="content_blocks")
 
+
+class EmailStatus(db.Model):
+    __table_args__ = (db.UniqueConstraint("user_id"),)
+
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey("user.id"), nullable=False)
+    email = db.Column(db.String(255), nullable=False)
+    verified_at = db.Column(db.DateTime, nullable=True)
+    last_verification_sent_at = db.Column(db.DateTime, nullable=True)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow, nullable=False)
+
+    user = db.relationship("User", back_populates="email_status")
+
+
+class AuthToken(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey("user.id"), nullable=False)
+    token_type = db.Column(db.String(32), nullable=False)
+    token_digest = db.Column(db.String(64), nullable=False, unique=True)
+    email_snapshot = db.Column(db.String(255), nullable=False)
+    expires_at = db.Column(db.DateTime, nullable=False)
+    consumed_at = db.Column(db.DateTime, nullable=True)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow, nullable=False)
+
+    user = db.relationship("User", back_populates="auth_tokens")
 
 
 class SupportEntry(db.Model):
