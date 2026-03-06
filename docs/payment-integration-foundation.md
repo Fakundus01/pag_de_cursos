@@ -54,3 +54,19 @@ Variables nuevas en `backend/.env.example`:
 - `SEED_DEMO_USERS=false` evita crear usuarios demo y compras seed en producci?n.
 - `INITIAL_ADMIN_EMAIL` + `INITIAL_ADMIN_PASSWORD` permiten bootstrapear el primer admin sin depender del usuario demo.
 - `FLASK_DEBUG=false` queda como default para no exponer debug por error.
+- El backend agrega headers de seguridad (`X-Content-Type-Options`, `X-Frame-Options`, `Referrer-Policy` y `Permissions-Policy`), y suma `Strict-Transport-Security` cuando recibe trafico HTTPS.
+
+
+## CSRF
+
+- El frontend obtiene un token de sesion desde `GET /api/auth/csrf` o `GET /api/auth/me`.
+- Cada `POST`, `PATCH` o `PUT` envia `X-CSRF-Token`.
+- Los webhooks de proveedores quedan exentos porque no vienen del navegador.
+- Este esquema funciona tambien cuando frontend y backend viven en dominios distintos.
+
+## Rate limiting
+
+- El backend ya limita por IP o usuario segun el endpoint para bajar abuso en auth, soporte, comentarios, admin y checkouts.
+- Variables nuevas en `backend/.env.example`: `RATE_LIMIT_SUPPORT_CHAT`, `RATE_LIMIT_AUTH_LOGIN`, `RATE_LIMIT_AUTH_REGISTER`, `RATE_LIMIT_CHECKOUT`, `RATE_LIMIT_PURCHASE`, `RATE_LIMIT_DEMO_CONFIRM`, `RATE_LIMIT_PROGRESS`, `RATE_LIMIT_COMMENTS`, `RATE_LIMIT_ACTIVITY_GENERATION` y `RATE_LIMIT_ADMIN_WRITE`, con sus respectivas ventanas `*_WINDOW`.
+- Cuando un cliente supera el limite, la API responde `429` con `Retry-After` y `retryAfterSeconds`.
+- Implementacion actual: memoria del proceso. Para varias instancias en Render conviene mover estos contadores a Redis o a un store compartido antes de escalar horizontalmente.

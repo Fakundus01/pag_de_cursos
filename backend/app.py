@@ -5,12 +5,15 @@ import hmac
 import json
 import os
 import re
+import secrets
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
 from datetime import datetime, timedelta
 from decimal import Decimal
 from functools import wraps
+from threading import Lock
 
 from flask import Flask, jsonify, request, session
 from flask_cors import CORS
@@ -34,6 +37,9 @@ DEFAULT_SUPPORT_KNOWLEDGE = [
     "Cada seccion puede incluir documento, video obligatorio, actividad guiada y un quiz tactico.",
     "El admin puede crear nuevas rutas con secciones, video, resumen accesible y contenido bloqueado o gratuito.",
 ]
+
+RATE_LIMIT_STATE: dict[str, list[float]] = {}
+RATE_LIMIT_LOCK = Lock()
 
 
 COURSE_BLUEPRINTS = [
@@ -178,6 +184,141 @@ def seed_demo_users_enabled() -> bool:
 
 def demo_payments_enabled() -> bool:
     return env_bool("ENABLE_DEMO_PAYMENTS", True)
+
+
+def csrf_header_name() -> str:
+    return os.getenv("CSRF_HEADER_NAME", "X-CSRF-Token").strip() or "X-CSRF-Token"
+
+
+def issue_csrf_token(*, force: bool = False) -> str:
+    existing = session.get("csrf_token")
+    if existing and not force:
+        return str(existing)
+    token = secrets.token_urlsafe(32)
+    session["csrf_token"] = token
+    return token
+
+
+def trusted_request_origins() -> set[str]:
+    origins = {origin.rstrip("/") for origin in parse_frontend_origins()}
+    origins.add(backend_public_origin().rstrip("/"))
+    return {origin for origin in origins if origin}
+
+
+def request_origin() -> str:
+    origin_header = request.headers.get("Origin", "").strip()
+    if origin_header:
+        return origin_header.rstrip("/")
+    referer_header = request.headers.get("Referer", "").strip()
+    if not referer_header:
+        return ""
+    parsed = urllib.parse.urlsplit(referer_header)
+    if not parsed.scheme or not parsed.netloc:
+        return ""
+    return f"{parsed.scheme}://{parsed.netloc}".rstrip("/")
+
+
+def request_uses_https() -> bool:
+    forwarded_proto = request.headers.get("X-Forwarded-Proto", "").strip().lower()
+    if forwarded_proto:
+        return forwarded_proto == "https"
+    return bool(request.is_secure)
+
+
+def csrf_is_exempt_request() -> bool:
+    if request.method.upper() in {"GET", "HEAD", "OPTIONS", "TRACE"}:
+        return True
+    return request.path.startswith("/api/payments/webhooks/")
+
+
+def validate_csrf_request() -> tuple[str, int] | None:
+    issue_csrf_token()
+    if csrf_is_exempt_request():
+        return None
+
+    origin = request_origin()
+    if origin and origin not in trusted_request_origins():
+        return ("Invalid request origin", 403)
+
+    provided_token = request.headers.get(csrf_header_name(), "").strip()
+    expected_token = str(session.get("csrf_token") or "")
+    if not provided_token:
+        return ("Missing CSRF token", 403)
+    if not expected_token or not hmac.compare_digest(provided_token, expected_token):
+        issue_csrf_token(force=True)
+        return ("Invalid CSRF token", 403)
+    return None
+
+
+def client_ip_address() -> str:
+    forwarded_for = request.headers.get("X-Forwarded-For", "").strip()
+    if forwarded_for:
+        return forwarded_for.split(",", 1)[0].strip() or "unknown"
+    real_ip = request.headers.get("X-Real-Ip", "").strip()
+    if real_ip:
+        return real_ip
+    return request.remote_addr or "unknown"
+
+
+def rate_limit_key(bucket: str, scope: str = "ip") -> str:
+    user_id = session.get("user_id")
+    if scope == "user" and user_id:
+        return f"{bucket}:user:{user_id}"
+    if scope == "user_or_ip" and user_id:
+        return f"{bucket}:user:{user_id}"
+    return f"{bucket}:ip:{client_ip_address()}"
+
+
+def consume_rate_limit(bucket: str, limit: int, window_seconds: int, scope: str = "ip") -> int | None:
+    if limit <= 0 or window_seconds <= 0:
+        return None
+
+    now = time.time()
+    cutoff = now - window_seconds
+    key = rate_limit_key(bucket, scope)
+
+    with RATE_LIMIT_LOCK:
+        timestamps = RATE_LIMIT_STATE.get(key, [])
+        timestamps = [stamp for stamp in timestamps if stamp > cutoff]
+        if len(timestamps) >= limit:
+            RATE_LIMIT_STATE[key] = timestamps
+            retry_after = max(1, int(window_seconds - (now - timestamps[0])))
+            return retry_after
+
+        timestamps.append(now)
+        RATE_LIMIT_STATE[key] = timestamps
+
+        stale_keys = [entry_key for entry_key, entry_timestamps in RATE_LIMIT_STATE.items() if not entry_timestamps or entry_timestamps[-1] <= cutoff]
+        for stale_key in stale_keys[:50]:
+            RATE_LIMIT_STATE.pop(stale_key, None)
+
+    return None
+
+
+def rate_limit(bucket: str, *, limit_env: str, limit_default: int, window_env: str, window_default: int, scope: str = "ip"):
+    def decorator(fn):
+        @wraps(fn)
+        def wrapper(*args, **kwargs):
+            retry_after = consume_rate_limit(
+                bucket,
+                max(0, env_int(limit_env, limit_default)),
+                max(1, env_int(window_env, window_default)),
+                scope=scope,
+            )
+            if retry_after is None:
+                return fn(*args, **kwargs)
+
+            response = jsonify({
+                "error": "Too many requests. Please wait before trying again.",
+                "retryAfterSeconds": retry_after,
+            })
+            response.status_code = 429
+            response.headers["Retry-After"] = str(retry_after)
+            return response
+
+        return wrapper
+
+    return decorator
 
 
 def build_course_payment_return_url(course: Course, reference: str, status: str) -> str:
@@ -469,7 +610,30 @@ def create_app() -> Flask:
         app.config["SESSION_COOKIE_DOMAIN"] = cookie_domain
 
     db.init_app(app)
-    CORS(app, supports_credentials=True, origins=parse_frontend_origins())
+    CORS(
+        app,
+        supports_credentials=True,
+        origins=parse_frontend_origins(),
+        allow_headers=["Content-Type", csrf_header_name()],
+    )
+
+    @app.before_request
+    def enforce_csrf_protection():
+        validation_error = validate_csrf_request()
+        if validation_error is None:
+            return None
+        message, status_code = validation_error
+        return jsonify({"error": message, "csrfToken": issue_csrf_token(force=True)}), status_code
+
+    @app.after_request
+    def apply_security_headers(response):
+        response.headers.setdefault("X-Content-Type-Options", "nosniff")
+        response.headers.setdefault("X-Frame-Options", "DENY")
+        response.headers.setdefault("Referrer-Policy", "strict-origin-when-cross-origin")
+        response.headers.setdefault("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
+        if request_uses_https():
+            response.headers.setdefault("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
+        return response
 
     with app.app_context():
         db.create_all()
@@ -1394,6 +1558,7 @@ def register_routes(app: Flask) -> None:
         return jsonify(serialize_support_content())
 
     @app.post("/api/support/chat")
+    @rate_limit("support-chat", limit_env="RATE_LIMIT_SUPPORT_CHAT", limit_default=18, window_env="RATE_LIMIT_SUPPORT_CHAT_WINDOW", window_default=60)
     def support_chat():
         data = request.get_json(force=True)
         message = str(data.get("message", "")).strip()
@@ -1401,7 +1566,12 @@ def register_routes(app: Flask) -> None:
             return jsonify({"error": "Message is required"}), 400
         return jsonify(build_support_response(message))
 
+    @app.get("/api/auth/csrf")
+    def csrf_token():
+        return jsonify({"csrfToken": issue_csrf_token()})
+
     @app.post("/api/auth/register")
+    @rate_limit("auth-register", limit_env="RATE_LIMIT_AUTH_REGISTER", limit_default=6, window_env="RATE_LIMIT_AUTH_REGISTER_WINDOW", window_default=600)
     def register():
         data = request.get_json(force=True)
         name = data.get("name", "").strip()
@@ -1459,9 +1629,10 @@ def register_routes(app: Flask) -> None:
         session.clear()
         session.permanent = True
         session["user_id"] = user.id
-        return jsonify({"profile": serialize_profile(user)}), 201
+        return jsonify({"profile": serialize_profile(user), "csrfToken": issue_csrf_token(force=True)}), 201
 
     @app.post("/api/auth/login")
+    @rate_limit("auth-login", limit_env="RATE_LIMIT_AUTH_LOGIN", limit_default=10, window_env="RATE_LIMIT_AUTH_LOGIN_WINDOW", window_default=600)
     def login():
         data = request.get_json(force=True)
         email = data.get("email", "").strip().lower()
@@ -1473,19 +1644,19 @@ def register_routes(app: Flask) -> None:
         session.clear()
         session.permanent = True
         session["user_id"] = user.id
-        return jsonify({"profile": serialize_profile(user)})
+        return jsonify({"profile": serialize_profile(user), "csrfToken": issue_csrf_token(force=True)})
 
     @app.post("/api/auth/logout")
     def logout():
         session.clear()
-        return jsonify({"ok": True})
+        return jsonify({"ok": True, "csrfToken": issue_csrf_token(force=True)})
 
     @app.get("/api/auth/me")
     def me():
         user = current_user()
         if user is None:
-            return jsonify({"profile": None})
-        return jsonify({"profile": serialize_profile(user)})
+            return jsonify({"profile": None, "csrfToken": issue_csrf_token()})
+        return jsonify({"profile": serialize_profile(user), "csrfToken": issue_csrf_token()})
 
     @app.get("/api/profile")
     @login_required
@@ -1503,6 +1674,7 @@ def register_routes(app: Flask) -> None:
 
     @app.post("/api/courses/<slug>/checkout")
     @login_required
+    @rate_limit("course-checkout", limit_env="RATE_LIMIT_CHECKOUT", limit_default=12, window_env="RATE_LIMIT_CHECKOUT_WINDOW", window_default=600, scope="user_or_ip")
     def create_checkout(user: User, slug: str):
         course = Course.query.filter_by(slug=slug).first_or_404()
         if course.is_free:
@@ -1582,6 +1754,7 @@ def register_routes(app: Flask) -> None:
 
     @app.post("/api/payments/<reference>/confirm-demo")
     @login_required
+    @rate_limit("payment-confirm-demo", limit_env="RATE_LIMIT_DEMO_CONFIRM", limit_default=20, window_env="RATE_LIMIT_DEMO_CONFIRM_WINDOW", window_default=300, scope="user_or_ip")
     def confirm_demo_payment(user: User, reference: str):
         if not demo_payments_enabled():
             return jsonify({"error": "Demo payments are disabled"}), 404
@@ -1665,6 +1838,7 @@ def register_routes(app: Flask) -> None:
 
     @app.post("/api/courses/<slug>/purchase")
     @login_required
+    @rate_limit("course-purchase-demo", limit_env="RATE_LIMIT_PURCHASE", limit_default=8, window_env="RATE_LIMIT_PURCHASE_WINDOW", window_default=600, scope="user_or_ip")
     def purchase_course(user: User, slug: str):
         if not demo_payments_enabled():
             return jsonify({"error": "Demo payments are disabled"}), 404
@@ -1712,6 +1886,7 @@ def register_routes(app: Flask) -> None:
 
     @app.post("/api/courses/<slug>/progress")
     @login_required
+    @rate_limit("course-progress", limit_env="RATE_LIMIT_PROGRESS", limit_default=80, window_env="RATE_LIMIT_PROGRESS_WINDOW", window_default=300, scope="user_or_ip")
     def complete_section(user: User, slug: str):
         data = request.get_json(force=True)
         section_id = str(data.get("sectionId", "")).strip()
@@ -1738,6 +1913,7 @@ def register_routes(app: Flask) -> None:
 
     @app.post("/api/admin/courses")
     @admin_required
+    @rate_limit("admin-create-course", limit_env="RATE_LIMIT_ADMIN_WRITE", limit_default=30, window_env="RATE_LIMIT_ADMIN_WRITE_WINDOW", window_default=600, scope="user_or_ip")
     def admin_create_course(user: User):
         data = request.get_json(force=True)
         try:
@@ -1754,6 +1930,7 @@ def register_routes(app: Flask) -> None:
 
     @app.put("/api/admin/support")
     @admin_required
+    @rate_limit("admin-save-support", limit_env="RATE_LIMIT_ADMIN_WRITE", limit_default=30, window_env="RATE_LIMIT_ADMIN_WRITE_WINDOW", window_default=600, scope="user_or_ip")
     def admin_save_support(user: User):
         data = request.get_json(force=True)
         faq_items = [str(item).strip() for item in data.get("faq", []) if str(item).strip()]
@@ -1791,6 +1968,7 @@ def register_routes(app: Flask) -> None:
         )
 
     @app.post("/api/activities/generate")
+    @rate_limit("activities-generate", limit_env="RATE_LIMIT_ACTIVITY_GENERATION", limit_default=24, window_env="RATE_LIMIT_ACTIVITY_GENERATION_WINDOW", window_default=300)
     def generate_activity():
         data = request.get_json(force=True)
         topic = data.get("topic", "macro discipline")
@@ -1809,6 +1987,7 @@ def register_routes(app: Flask) -> None:
 
     @app.post("/api/courses/<slug>/comments")
     @login_required
+    @rate_limit("course-comments", limit_env="RATE_LIMIT_COMMENTS", limit_default=12, window_env="RATE_LIMIT_COMMENTS_WINDOW", window_default=300, scope="user_or_ip")
     def add_comment(user: User, slug: str):
         course = Course.query.filter_by(slug=slug).first_or_404()
         enrollment = get_or_create_enrollment(user, course)
